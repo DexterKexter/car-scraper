@@ -60,6 +60,39 @@ def fuel_map(raw: str) -> str | None:
     return r
 
 
+def transmission_map(raw: str | None) -> str | None:
+    """Normalize raw transmission to one of: automatic, manual, cvt, dct, amt.
+
+    Sources:
+      guazi (slug):    AT / MT / CVT / DCT / AMT
+      encar (Korean):  오토 / 자동 → automatic;  수동 → manual;  CVT / DCT
+      che168 (CN):     自动 / 手动 / 双离合 (DCT) / 无级 (CVT) / AMT
+    """
+    if not raw:
+        return None
+    r = raw.lower().strip()
+    if not r:
+        return None
+    # DCT / dual-clutch first — 'dsg' is VW's brand for DCT.
+    if "dct" in r or "dsg" in r or "双离合" in r or "듀얼클러치" in r:
+        return "dct"
+    if "cvt" in r or "무단" in r or "무 단" in r or "无级" in r:
+        return "cvt"
+    if "amt" in raw.upper():
+        return "amt"
+    if (
+        r in ("mt", "m/t")
+        or "manual" in r or "수동" in r or "手动" in r or "механ" in r
+    ):
+        return "manual"
+    if (
+        r in ("at", "a/t")
+        or "auto" in r or "오토" in r or "자동" in r or "自动" in r or "автомат" in r
+    ):
+        return "automatic"
+    return r
+
+
 def headers(key: str, prefer: str = "") -> dict:
     h = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     if prefer:
@@ -237,7 +270,7 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
         "color": r.get("color") or None,
         "body_type": r.get("body_type") or None,
         "engine_type": fuel_map(r.get("fuel") or ""),
-        "transmission_type": r.get("gearbox") or r.get("transmission"),
+        "transmission_type": transmission_map(r.get("gearbox") or r.get("transmission")),
         "drive_type": r.get("drive") or None,
         "displacement": _displacement(r.get("engine_l") or r.get("displacement")),
         "horse_power": int(r.get("horsepower_ps")) if r.get("horsepower_ps") else None,
