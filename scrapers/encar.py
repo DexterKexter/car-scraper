@@ -161,8 +161,26 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
                 l.engine_l = round(cc / 1000, 1) if cc else None
             except (TypeError, ValueError):
                 pass
-        if spec.get("bodyName"):
-            l.body_type = spec["bodyName"]
+        # Encar's spec.bodyName mixes real body shapes (SUV/RV/Van) with sedan
+        # size classes (Full-size / Mid-size / Light / Compact). Map size
+        # classes to "Sedan" so downstream gets a canonical body.
+        raw_body = spec.get("bodyName") or ""
+        ENCAR_BODY = {
+            "SUV": "SUV",
+            "RV": "Minivan",        # Recreational Vehicle = MPV in Korea
+            "Van": "Minivan",
+            "Cargo": "Minivan",
+            "Full-size": "Sedan",
+            "Mid-size": "Sedan",
+            "Light": "Sedan",       # 경차 = "Light Car" — kei-class sedan
+            "Compact": "Sedan",
+            "Sub-compact": "Hatchback",
+            "Small": "Hatchback",
+            "Sports": "Coupe",
+            "Coupe": "Coupe",
+        }
+        if raw_body:
+            l.body_type = ENCAR_BODY.get(raw_body, raw_body)
         if cat.get("originPrice"):
             try:
                 l.new_price_krw = int(float(cat["originPrice"]) * 10000)
