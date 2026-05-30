@@ -45,10 +45,22 @@ class Listing:
     fuel: str = ""
     transmission: str = ""
     color: str = ""
+    seats: int | None = None
+    displacement_cc: int | None = None
+    engine_l: float | None = None
+    body_type: str = ""
     price_amount: float | None = None
     currency: str = "KRW"
+    new_price_krw: int | None = None
     vin: str = ""
     city: str = ""
+    country: str = "Korea"
+    steering: str = "Left"
+    accident_free: bool | None = None
+    no_water_damage: bool | None = None
+    owners_count: int | None = None
+    has_inspection_report: bool | None = None
+    published_at: str = ""
     options_standard: list[str] = field(default_factory=list)
     options_extra: list[str] = field(default_factory=list)
     photos: list[str] = field(default_factory=list)
@@ -124,15 +136,49 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
         transmission=card.get("Transmission", ""),
         price_amount=int(float(price_man) * 10000) if price_man is not None else None,
         city=card.get("OfficeCityState", ""),
+        published_at=card.get("ModifiedDate", ""),
         photos=_photo_urls(card.get("Photos", [])),
     )
     l.raw["list_keys"] = sorted(card.keys())
 
     if detail and "_err" not in detail:
         l.vin = detail.get("vin", "") or ""
+        spec = detail.get("spec") or {}
         cat = detail.get("category") or {}
-        if cat.get("colorName"):
-            l.color = cat["colorName"]
+        cond = detail.get("condition") or {}
+
+        if spec.get("colorName"):
+            l.color = spec["colorName"]
+        if spec.get("seatCount"):
+            try:
+                l.seats = int(spec["seatCount"])
+            except (TypeError, ValueError):
+                pass
+        if spec.get("displacement"):
+            try:
+                cc = int(spec["displacement"])
+                l.displacement_cc = cc
+                l.engine_l = round(cc / 1000, 1) if cc else None
+            except (TypeError, ValueError):
+                pass
+        if spec.get("bodyName"):
+            l.body_type = spec["bodyName"]
+        if cat.get("originPrice"):
+            try:
+                l.new_price_krw = int(float(cat["originPrice"]) * 10000)
+            except (TypeError, ValueError):
+                pass
+
+        # accident report: condition.accident = {"count": N, "items": [...]}
+        acc = cond.get("accident") or {}
+        if isinstance(acc, dict):
+            cnt = acc.get("count")
+            if cnt is not None:
+                l.accident_free = (int(cnt) == 0)
+                l.owners_count = acc.get("ownerChanged")
+        insp = cond.get("inspection") or {}
+        l.has_inspection_report = bool(insp)
+
         opts = detail.get("options") or {}
         if isinstance(opts, dict):
             l.options_standard = list(opts.get("standard") or [])
