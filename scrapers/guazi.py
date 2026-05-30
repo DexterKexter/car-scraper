@@ -131,9 +131,13 @@ def fetch_list(
     path: str = LIST_PATH,
     params: dict[str, str] | None = None,
     max_pages: int = 50,
+    max_mileage_km: int | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
 ) -> list[Listing]:
     out: list[Listing] = []
     seen: set[str] = set()
+    skipped = 0
     page_num = 1
     while len(out) < limit and page_num <= max_pages:
         url = _build_list_url(path, page_num, params)
@@ -154,11 +158,18 @@ def fetch_list(
                 l = Listing(url=urljoin(BASE, h), slug=slug, **parsed)
             else:
                 l = Listing(url=urljoin(BASE, h), slug=slug, listing_id=slug)
+            if max_mileage_km is not None and (l.mileage_km or 0) > max_mileage_km:
+                skipped += 1; continue
+            if min_year is not None and (l.year or 0) < min_year:
+                skipped += 1; continue
+            if max_year is not None and (l.year or 0) > max_year:
+                skipped += 1; continue
             out.append(l)
             if len(out) >= limit:
                 break
         page_num += 1
-    print(f"[guazi] total parsed: {len(out)}", file=sys.stderr)
+    print(f"[guazi] total parsed: {len(out)} (skipped {skipped} by client filters)",
+          file=sys.stderr)
     return out
 
 
@@ -336,8 +347,14 @@ def run(
     detail: bool = True,
     path: str = LIST_PATH,
     params: dict[str, str] | None = None,
+    max_mileage_km: int | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
 ) -> list[dict]:
-    listings = fetch_list(limit=limit, path=path, params=params)
+    listings = fetch_list(
+        limit=limit, path=path, params=params,
+        max_mileage_km=max_mileage_km, min_year=min_year, max_year=max_year,
+    )
     if detail:
         for l in listings:
             try:
@@ -375,10 +392,17 @@ if __name__ == "__main__":
     p.add_argument("--path", default=LIST_PATH)
     p.add_argument("-f", "--filter", action="append", default=[],
                    help="Repeatable. key=value, e.g. -f price=5000,15000 -f horsepower=0,160")
+    p.add_argument("--max-mileage-km", type=int, default=None,
+                   help="Client-side: drop listings with higher mileage")
+    p.add_argument("--min-year", type=int, default=None)
+    p.add_argument("--max-year", type=int, default=None)
     p.add_argument("--out", default="out/guazi.json")
     args = p.parse_args()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     params = _parse_filter_args(args.filter)
-    data = run(limit=args.limit, detail=not args.no_detail, path=args.path, params=params)
+    data = run(
+        limit=args.limit, detail=not args.no_detail, path=args.path, params=params,
+        max_mileage_km=args.max_mileage_km, min_year=args.min_year, max_year=args.max_year,
+    )
     Path(args.out).write_text(json.dumps(data, ensure_ascii=False, indent=2))
     print(f"\nWrote {len(data)} listings -> {args.out}")
