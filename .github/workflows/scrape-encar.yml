@@ -67,7 +67,11 @@ jobs:
               bn = l.get('brand_canonical') or l['brand']
               mn = l.get('model_canonical') or l['model']
               tr = l.get('trim') or l['badge']
-              print(f"  - {bn} {mn} [{tr}] | {l['year_month']} | {l['mileage_km']}km | {l['city']} | {l['price_amount']} {l['currency']} | vin={l['vin']}")
+              cls = l.get('vehicle_class') or ''
+              gen = l.get('generation') or ''
+              cls_s = f"[{cls}]" if cls else ""
+              gen_s = f"({gen})" if gen else ""
+              print(f"  - {bn} {cls_s} {mn} {gen_s} [{tr}] | {l['year_month']} | {l['mileage_km']}km | {l['city']} | {l['price_amount']} {l['currency']} | vin={l['vin']}")
           PY
 
       - uses: actions/upload-artifact@v4

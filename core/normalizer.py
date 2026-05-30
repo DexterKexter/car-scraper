@@ -33,37 +33,89 @@ TIMEOUT = 60.0
 APP_NAME = "car-scraper"
 APP_URL = "https://github.com/DexterKexter/car-scraper"
 
-SYSTEM_PROMPT = """You normalize used-car listing data scraped from various sites (Guazi, Encar, Kolesa, Autocango).
-For each input record, infer canonical fields.
+SYSTEM_PROMPT = """You normalize used-car listing data from sites Guazi, Encar, Kolesa, Autocango.
+For each input record output the canonical fields in this hierarchy:
+brand -> vehicle_class -> model -> generation -> trim.
 
-RULES:
-- brand_canonical: standard English brand name.
-  Examples: "Geely Auto" -> "Geely"; "land" -> "Land Rover"; "기아" -> "Kia";
-  "제네시스" -> "Genesis"; "KG모빌리티(쌍용)" -> "SsangYong"; "르노코리아(삼성)" -> "Renault Korea".
+FIELDS:
 
-- model_canonical: BARE model name only, no generation suffix, no chassis code.
-  Examples: "Sportage 5th Gen" -> "Sportage"; "Carnival 4th Gen" -> "Carnival";
-  "Sonata LF" -> "Sonata"; "Grandeur IG" -> "Grandeur"; "Elantra AD" -> "Elantra";
-  "All New Carnival" -> "Carnival"; "The New Morning" -> "Morning";
-  "GV80 Coupe" -> "GV80" (Coupe is body variant, put in trim);
-  "rover range rover evoque" -> "Range Rover Evoque" (Evoque is model);
-  "auto preface" -> "Preface"; "ct5" -> "CT5"; "셀토스" -> "Seltos".
+brand_canonical: standard English brand name.
+  Examples: "Geely Auto"->"Geely", "land"->"Land Rover", "기아"->"Kia",
+  "제네시스"->"Genesis", "KG모빌리티(쌍용)"->"SsangYong", "르노코리아(삼성)"->"Renault Korea",
+  "쉐보레(GM대우)"->"Chevrolet", "벤츠"->"Mercedes-Benz", "奔驰"->"Mercedes-Benz",
+  "宝马"->"BMW", "奥迪"->"Audi".
 
-- generation: chassis code, generation number, or facelift marker.
-  Examples: "Sportage 5th Gen" -> "5th Gen"; "Sonata LF" -> "LF"; "Grandeur IG" -> "IG";
-  "Elantra AD" -> "AD"; "All New Carnival" -> "All New"; "The New Morning" -> "The New";
-  "카니발 4세대" -> "4세대"; "BMW 3 Series F30" -> "F30".
-  Empty string if no generation marker.
+vehicle_class: family/lineup name within the brand. Empty for brands without class structure.
+  Mercedes-Benz:  "A-Class","B-Class","C-Class","E-Class","S-Class","CLA-Class","CLS-Class",
+                  "GLA-Class","GLB-Class","GLC-Class","GLE-Class","GLS-Class","G-Class",
+                  "EQ" (EQS/EQE/EQA/EQB/EQC), "AMG" (AMG GT lineup), "Maybach".
+  BMW:            "1 Series","2 Series","3 Series","4 Series","5 Series","6 Series",
+                  "7 Series","8 Series","X Series" (X1-X7), "Z Series" (Z4),
+                  "M Series" (standalone M2/M3/M4/M5/M8), "i Series" (i3/i4/i5/i7/iX).
+  Audi:           "A-Series" (A1-A8), "Q-Series" (Q2-Q8), "RS-Series", "S-Series",
+                  "TT","R8","e-tron".
+  Lexus:          "ES","IS","LS","LC","RC","NX","RX","GX","LX","UX".
+  Genesis:        "G" (G70/G80/G90), "GV" (GV60/GV70/GV80).
+  Cadillac:       "CT-Series" (CT4/CT5/CT6), "XT-Series" (XT4/XT5/XT6),
+                  "Escalade","ATS","CTS".
+  Infiniti:       "Q-Series","QX-Series".
+  Volvo:          "S-Series" (S60/S90), "V-Series" (V60/V90), "XC-Series" (XC40/XC60/XC90).
+  Porsche:        "911","718","Cayenne","Macan","Panamera","Taycan".
+  Kia:            "K-Series" only if model is K3/K5/K7/K8/K9. Otherwise empty
+                  (Sportage, Sorento, Carnival, Seltos, Morning, EV6 etc -> empty).
+  Hyundai:        empty (no class lineup; Sonata/Elantra/Tucson/Santa Fe directly).
+  Brands without class structure (most Asian/Chinese mass-market): leave empty.
 
-- trim: edition / grade / package / body variant. Strip year, "Used", "Model", "Version", "Edition" redundant words.
-  Examples: "Used Cadillac CT5 2021 28T Platinum Sport Model" -> "28T Platinum Sport";
-  "Used Geometry C 2022 400KM Commuter Version" -> "400KM Commuter";
-  "디젤 3.0 4WD 6인승" -> "3.0 Diesel 4WD 6-seat";
-  "GV80 Coupe 2.5T Gasoline AWD" -> "Coupe 2.5T Gasoline AWD";
-  "9인승 노블레스" -> "9-seat Noblesse".
+model_canonical: bare model badge (the short identifier within the class).
+  Strip generation/chassis codes and facelift markers from model. Strip body variants
+  like "Coupe","Cabriolet","Avant","Touring" into trim. Strip engine/powertrain suffixes
+  (xDrive40i, 45 TFSI, 4MATIC, quattro) into trim.
+  Examples:
+    "BMW 320i F30 M Sport"             -> "320i"
+    "BMW 330i xDrive G20"              -> "330i"      (xDrive -> trim)
+    "BMW X5 xDrive40i G05"             -> "X5"        (xDrive40i -> trim)
+    "BMW M3 Competition"               -> "M3"        (Competition -> trim)
+    "Mercedes-Benz C200 4MATIC W205"   -> "C200"      (4MATIC -> trim)
+    "Mercedes-Benz GLE350 V167"        -> "GLE350"
+    "Mercedes-Benz AMG GT 4-Door"      -> "GT 4-Door"
+    "Audi A4 45 TFSI B9 quattro"       -> "A4"        (45 TFSI, quattro -> trim)
+    "Audi RS6 Avant"                   -> "RS6"       (Avant -> trim)
+    "Sportage 5th Gen"                 -> "Sportage"
+    "Carnival 4th Gen"                 -> "Carnival"
+    "Sonata LF"                        -> "Sonata"
+    "All New Carnival"                 -> "Carnival"
+    "The New Morning"                  -> "Morning"
+    "GV80 Coupe"                       -> "GV80"      (Coupe -> trim)
+    "rover range rover evoque"         -> "Range Rover Evoque"
+    "auto preface"                     -> "Preface"
+    "ct5"                              -> "CT5"
+    "셀토스"                            -> "Seltos"
+    "Lexus ES300h"                     -> "ES300h"
+    "Genesis GV70 2.5T AWD"            -> "GV70"      (2.5T AWD -> trim)
 
-- Empty string if a field cannot be inferred.
-- Output via the JSON tool only.
+generation: chassis code, generation number, or facelift marker.
+  BMW chassis:    E30/E36/E46/E90/F30/G20 (3 Series); E39/E60/F10/G30 (5 Series);
+                  E70/F15/G05 (X5); F40 (1 Series); etc.
+  Mercedes:       W201/W202/W203/W204/W205/W206 (C-Class);
+                  W210/W211/W212/W213 (E-Class); W221/W222/W223 (S-Class);
+                  V167 (GLE).
+  Audi:           B5/B6/B7/B8/B9 (A4); C5/C6/C7/C8 (A6).
+  Porsche:        996/997/991/992 (911).
+  Korean facelifts: "4세대","5세대","All New","The New","Premium New".
+  Hyundai/Kia chassis: LF (Sonata), IG (Grandeur), AD/CN7 (Elantra), QM (Sportage NQ5).
+  Empty if no generation marker present.
+
+trim: edition, grade, package, body variant, drivetrain suffix.
+  Strip "Used","Year","Model","Version","Edition" if redundant.
+  Examples:
+    "Used Cadillac CT5 2021 28T Platinum Sport Model" -> "28T Platinum Sport"
+    "Used Geometry C 2022 400KM Commuter Version"     -> "400KM Commuter"
+    "디젤 3.0 4WD 6인승"                              -> "3.0 Diesel 4WD 6-seat"
+    "9인승 노블레스"                                  -> "9-seat Noblesse"
+    "BMW X5 xDrive40i M Sport"                       -> "xDrive40i M Sport"
+    "Audi A4 45 TFSI quattro S line"                 -> "45 TFSI quattro S line"
+
+Empty string when a field cannot be inferred. Output via the JSON tool only.
 """
 
 OUTPUT_SCHEMA = {
@@ -76,11 +128,15 @@ OUTPUT_SCHEMA = {
                 "properties": {
                     "id": {"type": "string"},
                     "brand_canonical": {"type": "string"},
+                    "vehicle_class": {"type": "string"},
                     "model_canonical": {"type": "string"},
                     "generation": {"type": "string"},
                     "trim": {"type": "string"},
                 },
-                "required": ["id", "brand_canonical", "model_canonical", "generation", "trim"],
+                "required": [
+                    "id", "brand_canonical", "vehicle_class",
+                    "model_canonical", "generation", "trim",
+                ],
                 "additionalProperties": False,
             },
         }
@@ -184,6 +240,7 @@ def _call_openrouter(
         if "id" in r_:
             out[str(r_["id"])] = {
                 "brand_canonical": r_.get("brand_canonical", ""),
+                "vehicle_class": r_.get("vehicle_class", ""),
                 "model_canonical": r_.get("model_canonical", ""),
                 "generation": r_.get("generation", ""),
                 "trim": r_.get("trim", ""),
