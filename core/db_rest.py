@@ -19,19 +19,44 @@ def slugify(s: str) -> str:
 
 
 def fuel_map(raw: str) -> str | None:
+    """Normalize source fuel string to one of: electric, phev, hybrid,
+    diesel, gasoline, lpg, cng. Returns None for empty input.
+
+    Handles English (guazi_en), Chinese (guazi raw), and Korean (encar).
+    Korean fuel labels from encar:
+      가솔린         = gasoline
+      디젤           = diesel
+      전기           = electric
+      가솔린+전기    = gasoline+electric → hybrid
+      가솔린(하이브리드) = hybrid
+      LPG / LPG(일반인 구입) = lpg
+      CNG            = cng
+      수소           = hydrogen
+    """
     if not raw:
         return None
     r = raw.lower()
-    if any(k in r for k in ("bev", "electric")):
-        return "electric"
-    if "phev" in r or "plug-in" in r:
+    # Order matters: PHEV/hybrid checks before bare gasoline/electric.
+    if "phev" in r or "plug-in" in r or "플러그인" in r:
         return "phev"
-    if "hev" in r or "hybrid" in r or "reev" in r:
+    if (
+        "hev" in r or "hybrid" in r or "reev" in r
+        or "하이브리드" in r
+        or "+전기" in r or "전기+" in r  # 가솔린+전기 / 디젤+전기
+    ):
         return "hybrid"
-    if "diesel" in r:
+    if "bev" in r or "electric" in r or "전기" in r:
+        return "electric"
+    if "diesel" in r or "디젤" in r:
         return "diesel"
-    if "gasoline" in r or "petrol" in r:
+    if "gasoline" in r or "petrol" in r or "가솔린" in r:
         return "gasoline"
+    if "lpg" in r:
+        return "lpg"
+    if "cng" in r:
+        return "cng"
+    if "수소" in r or "hydrogen" in r:
+        return "hydrogen"
     return r
 
 
