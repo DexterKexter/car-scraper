@@ -120,7 +120,7 @@ def main():
     with httpx.Client(timeout=60.0) as client:
         bmap = db_rest.fetch_brand_map(client, key)
         mmap = db_rest.fetch_model_map(client, key, bmap)
-        rows = [db_rest.build_car_row(r, site, bmap, mmap) for r in records]
+        rows = [db_rest.build_car_row(r, site, bmap, mmap, client, key) for r in records]
         rows = [r for r in rows if r]
         print(f"[pipeline] {len(rows)} car rows ready to upsert", file=sys.stderr)
         n = db_rest.upsert_cars(client, key, rows)

@@ -73,7 +73,55 @@ def fetch_model_map(client, key, brand_map) -> dict[tuple, int]:
     return out
 
 
-def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict) -> dict | None:
+def ensure_brand(client, key, slug: str, name: str, kolesa_slug: str | None) -> int:
+    """Find or create brand. Returns brand_id."""
+    payload = [{"slug": slug, "name": name, "source": SOURCE_TAG,
+                "kolesa_slug": kolesa_slug, "country": "China"}]
+    r = client.post(f"{SUPABASE_URL}/rest/v1/brands",
+                    params={"on_conflict": "source,slug"},
+                    headers=headers(key, "resolution=merge-duplicates,return=representation"),
+                    json=payload)
+    if r.status_code in (200, 201):
+        return r.json()[0]["id"]
+    raise RuntimeError(f"ensure_brand failed {r.status_code}: {r.text[:200]}")
+
+
+def ensure_model(client, key, brand_id: int, slug: str, name: str,
+                 kolesa_slug: str | None, kolesa_brand_slug: str | None,
+                 body_type: str | None) -> int:
+    # First: check existence by (brand_id, lower(name)) — there's a unique constraint on it
+    r0 = client.get(
+        f"{SUPABASE_URL}/rest/v1/models",
+        params={"select": "id,name,slug,kolesa_slug", "brand_id": f"eq.{brand_id}",
+                "name": f"ilike.{name}"},
+        headers=headers(key),
+    )
+    if r0.status_code == 200 and r0.json():
+        existing = r0.json()[0]
+        # backfill kolesa_slug if missing
+        if kolesa_slug and not existing.get("kolesa_slug"):
+            client.patch(
+                f"{SUPABASE_URL}/rest/v1/models",
+                params={"id": f"eq.{existing['id']}"},
+                headers=headers(key, "return=minimal"),
+                json={"kolesa_slug": kolesa_slug, "kolesa_brand_slug": kolesa_brand_slug},
+            )
+        return existing["id"]
+
+    payload = [{"brand_id": brand_id, "slug": slug, "name": name, "source": SOURCE_TAG,
+                "kolesa_slug": kolesa_slug, "kolesa_brand_slug": kolesa_brand_slug,
+                "body_type": body_type}]
+    r = client.post(f"{SUPABASE_URL}/rest/v1/models",
+                    params={"on_conflict": "brand_id,slug,source"},
+                    headers=headers(key, "resolution=merge-duplicates,return=representation"),
+                    json=payload)
+    if r.status_code in (200, 201):
+        return r.json()[0]["id"]
+    raise RuntimeError(f"ensure_model failed {r.status_code}: {r.text[:200]}")
+
+
+def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
+                  client=None, key: str | None = None) -> dict | None:
     mark = r.get("mark") or r.get("brand_canonical") or r.get("brand") or ""
     mf = r.get("model_family") or r.get("model") or ""
     if not (mark and mf):
@@ -81,10 +129,22 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict) -> dic
     bslug = slugify(mark)
     mslug = slugify(mf)
     brand_id = brand_map.get(bslug)
+    if not brand_id and client:
+        brand_id = ensure_brand(client, key, bslug, mark, r.get("kolesa_brand_slug"))
+        brand_map[bslug] = brand_id
+        print(f"[db] +brand {bslug} -> id={brand_id}", file=sys.stderr)
     if not brand_id:
         print(f"[db] no brand_id for {bslug!r} ({mark}), skipping", file=sys.stderr)
         return None
     model_id = model_map.get((bslug, mslug))
+    if not model_id and client:
+        model_id = ensure_model(
+            client, key, brand_id, mslug, mf,
+            r.get("kolesa_model_slug"), r.get("kolesa_brand_slug"),
+            r.get("body_type"),
+        )
+        model_map[(bslug, mslug)] = model_id
+        print(f"[db] +model {bslug}/{mslug} -> id={model_id}", file=sys.stderr)
     reg = r.get("registration_date") or ""
     reg_date = reg.replace(".", "-") + "-01" if reg and len(reg) == 7 else None
     loc = r.get("location") or ""
@@ -167,7 +227,7 @@ def main():
         mmap = fetch_model_map(client, args.key, bmap)
         print(f"[db] brand_map: {len(bmap)} entries", file=sys.stderr)
         print(f"[db] model_map: {len(mmap)} entries", file=sys.stderr)
-        rows = [build_car_row(r, source, bmap, mmap) for r in records]
+        rows = [build_car_row(r, source, bmap, mmap, client, args.key) for r in records]
         rows = [r for r in rows if r]
         print(f"[db] {len(rows)} cars to upsert", file=sys.stderr)
         n = upsert_cars(client, args.key, rows)
