@@ -68,7 +68,9 @@ def _get(
 
 
 def _is_brand_path(href: str) -> bool:
-    if "?" in href:
+    # brand URLs are /cars/<slug>  (no trailing slash)
+    # city  URLs are /cars/<slug>/ (with trailing slash)
+    if "?" in href or href.endswith("/"):
         return False
     parts = href.strip("/").split("/")
     return len(parts) == 2 and parts[0] == "cars"
