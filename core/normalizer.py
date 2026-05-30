@@ -25,6 +25,8 @@ from typing import Any
 
 import httpx
 
+from core.kolesa_index import KolesaIndex
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 CACHE_PATH = Path(".cache/normalizer.sqlite")
@@ -36,6 +38,49 @@ APP_URL = "https://github.com/DexterKexter/car-scraper"
 SYSTEM_PROMPT = """You normalize used-car listing data from sites Guazi, Encar, Kolesa, Autocango.
 For each input record output the canonical fields in this hierarchy:
 brand -> vehicle_class -> model -> generation -> trim.
+Also output the matching kolesa.kz brand/model slug when given a candidate.
+
+CHINESE SUB-BRAND MAP (parent / sub-brand split):
+  "Dongfeng Aeolus"    -> brand="Dongfeng",   vehicle_class="Aeolus"     (Fengshen/风神 lineup)
+  "Dongfeng Fengxing"  -> brand="Dongfeng",   vehicle_class="Fengxing"
+  "Dongfeng Voyah"     -> brand="Dongfeng",   vehicle_class="Voyah"      (or Voyah as separate brand if site treats so)
+  "Dongfeng M-Hero"    -> brand="Dongfeng",   vehicle_class="M-Hero"
+  "GAC Trumpchi"       -> brand="GAC",        vehicle_class="Trumpchi"
+  "GAC Aion"           -> brand="GAC",        vehicle_class="Aion"
+  "GAC Hyptec"         -> brand="GAC",        vehicle_class="Hyptec"
+  "SAIC Roewe"         -> brand="Roewe"       (Roewe is recognized as standalone)
+  "SAIC Maxus"         -> brand="Maxus"
+  "SAIC-GM Wuling"     -> brand="Wuling"
+  "FAW Hongqi"         -> brand="Hongqi"
+  "FAW Bestune"        -> brand="Bestune"
+  "Geely Galaxy"       -> brand="Geely",      vehicle_class="Galaxy"
+  "Geely Geometry"     -> brand="Geometry"    (Geometry is now standalone EV brand)
+  "Geely Zeekr"        -> brand="Zeekr"       (standalone)
+  "Geely Lynk & Co"    -> brand="Lynk & Co"
+  "Chery Jetour"       -> brand="Jetour"
+  "Chery Exeed"        -> brand="EXEED"
+  "Chery iCar"         -> brand="iCar"
+  "Chery Omoda"        -> brand="OMODA"
+  "Chery Jaecoo"       -> brand="Jaecoo"
+  "Great Wall Haval"   -> brand="Haval"
+  "Great Wall Tank"    -> brand="Tank"
+  "Great Wall Wey"     -> brand="Wey"
+  "Great Wall Ora"     -> brand="Ora"
+  "Changan Deepal"     -> brand="Deepal"
+  "Changan Avatr"      -> brand="Avatr"
+  "BYD Denza"          -> brand="Denza"
+  "BYD Yangwang"       -> brand="Yangwang"
+  "BYD Fang Cheng Bao" -> brand="Fang Cheng Bao"
+  "NIO ONVO"           -> brand="ONVO"        (NIO sub-brand)
+  "NIO Firefly"        -> brand="Firefly"     (NIO sub-brand)
+  "Huawei Luxeed"      -> brand="Luxeed"      (Huawei+Chery)
+  "Huawei AITO"        -> brand="AITO"        (Huawei+Seres)
+  "Huawei Stelato"     -> brand="Stelato"     (Huawei+BAIC)
+  "Huawei Maextro"     -> brand="Maextro"     (Huawei+JAC)
+  Rule: if a sub-brand has its own dealer network + own model line, treat it as standalone brand.
+        If it's just a series under parent, use vehicle_class.
+
+FIELDS:
 
 FIELDS:
 
@@ -116,6 +161,17 @@ trim: edition, grade, package, body variant, drivetrain suffix.
     "Audi A4 45 TFSI quattro S line"                 -> "45 TFSI quattro S line"
 
 Empty string when a field cannot be inferred. Output via the JSON tool only.
+
+KOLESA MAPPING (set kolesa_brand_slug, kolesa_model_slug, in_kolesa):
+The user message gives you, for each record, a `kolesa_candidate` object with the best
+fuzzy-matched kolesa brand + that brand's full model list. Rules:
+  - If raw brand clearly matches the candidate, set kolesa_brand_slug = candidate.brand_slug.
+  - If raw model matches one of candidate.models (case-insensitive, ignore brand prefix),
+    set kolesa_model_slug to that model's slug.
+  - in_kolesa = true only if BOTH brand AND model are matched in kolesa.
+  - If raw brand is a sub-brand (e.g. Aeolus, Trumpchi, Voyah), map kolesa_brand_slug
+    to the PARENT brand on kolesa (kolesa lists them under parent: dong-feng, gac, voyah).
+  - If no candidate fits, leave kolesa_*_slug empty, in_kolesa=false.
 """
 
 OUTPUT_SCHEMA = {
@@ -132,10 +188,14 @@ OUTPUT_SCHEMA = {
                     "model_canonical": {"type": "string"},
                     "generation": {"type": "string"},
                     "trim": {"type": "string"},
+                    "kolesa_brand_slug": {"type": "string"},
+                    "kolesa_model_slug": {"type": "string"},
+                    "in_kolesa": {"type": "boolean"},
                 },
                 "required": [
                     "id", "brand_canonical", "vehicle_class",
                     "model_canonical", "generation", "trim",
+                    "kolesa_brand_slug", "kolesa_model_slug", "in_kolesa",
                 ],
                 "additionalProperties": False,
             },
@@ -179,17 +239,29 @@ def _cache_put(c: sqlite3.Connection, k: str, v: dict, model: str) -> None:
     c.commit()
 
 
-def _build_prompt(items: list[dict]) -> str:
-    payload = [
-        {
+def _build_prompt(items: list[dict], idx: KolesaIndex | None = None) -> str:
+    payload = []
+    for it in items:
+        rec = {
             "id": str(it["__id"]),
             "site": it.get("site", ""),
             "brand": it.get("brand", ""),
             "model": it.get("model", ""),
             "title": it.get("title", ""),
         }
-        for it in items
-    ]
+        if idx and idx.loaded:
+            slug = idx.match_brand(it.get("brand", "")) or ""
+            if slug:
+                b = idx.brand(slug)
+                rec["kolesa_candidate"] = {
+                    "brand_slug": slug,
+                    "brand_name": b.get("name", ""),
+                    "models": [
+                        {"slug": m["slug"], "name": m["name"]}
+                        for m in b.get("models", [])
+                    ][:80],
+                }
+        payload.append(rec)
     return (
         "Normalize the following used-car records. Return ONE tool call.\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -197,7 +269,8 @@ def _build_prompt(items: list[dict]) -> str:
 
 
 def _call_openrouter(
-    client: httpx.Client, api_key: str, model: str, items: list[dict]
+    client: httpx.Client, api_key: str, model: str, items: list[dict],
+    idx: KolesaIndex | None = None,
 ) -> dict[str, dict]:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -209,7 +282,7 @@ def _call_openrouter(
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_prompt(items)},
+            {"role": "user", "content": _build_prompt(items, idx)},
         ],
         "tool_choice": {"type": "function", "function": {"name": "submit_normalized"}},
         "tools": [
@@ -244,6 +317,9 @@ def _call_openrouter(
                 "model_canonical": r_.get("model_canonical", ""),
                 "generation": r_.get("generation", ""),
                 "trim": r_.get("trim", ""),
+                "kolesa_brand_slug": r_.get("kolesa_brand_slug", ""),
+                "kolesa_model_slug": r_.get("kolesa_model_slug", ""),
+                "in_kolesa": bool(r_.get("in_kolesa", False)),
             }
     return out
 
@@ -258,6 +334,11 @@ def normalize(
         return records
     api_key = api_key or os.getenv("OPENROUTER_API_KEY")
     cache = _cache_open()
+    kolesa = KolesaIndex()
+    if kolesa.loaded:
+        print(f"[normalizer] kolesa catalog: {len(kolesa.catalog)} brands", file=sys.stderr)
+    else:
+        print("[normalizer] no kolesa catalog (out/kolesa_catalog.json missing)", file=sys.stderr)
 
     pending: list[dict] = []
     for idx, rec in enumerate(records):
@@ -292,7 +373,7 @@ def normalize(
         for i in range(0, len(pending), batch_size):
             chunk = pending[i : i + batch_size]
             try:
-                result = _call_openrouter(client, api_key, model, chunk)
+                result = _call_openrouter(client, api_key, model, chunk, kolesa)
             except Exception as e:
                 print(f"[normalizer] batch {i//batch_size} err: {e}", file=sys.stderr)
                 continue
