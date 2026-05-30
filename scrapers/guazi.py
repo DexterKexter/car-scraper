@@ -71,8 +71,8 @@ class Listing:
     inspection_categories: list[dict] = field(default_factory=list)
     inspection_status: str = ""
     price_raw: str = ""
-    price_wan_yuan: float | None = None
-    price_usd: float | None = None
+    price_amount: float | None = None
+    currency: str = "USD"
     location: str = ""
     spec: dict = field(default_factory=dict)
     photos: list[str] = field(default_factory=list)
@@ -307,18 +307,16 @@ def enrich_detail(l: Listing) -> Listing:
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
     raw_price = offers.get("price") or metas.get("product:price:amount") or ""
-    currency = offers.get("priceCurrency") or metas.get("product:price:currency") or ""
+    cur = offers.get("priceCurrency") or metas.get("product:price:currency") or "USD"
     if raw_price:
         price_f = _to_float(str(raw_price).replace(",", ""))
         if price_f == INQUIRE_PRICE:
             l.price_raw = "inquire"
+            l.price_amount = None
         else:
-            l.price_raw = f"{currency or '$'}{raw_price}"
-            if currency == "USD":
-                l.price_usd = price_f
-            elif currency in {"CNY", "RMB"}:
-                if price_f is not None:
-                    l.price_wan_yuan = price_f / 10000
+            l.price_raw = f"{cur}{raw_price}"
+            l.price_amount = price_f
+        l.currency = cur
 
     # Schema.org Car extras (from streamed payload — not in inline JSON-LD)
     if not l.fuel:

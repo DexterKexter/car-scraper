@@ -34,14 +34,36 @@ APP_NAME = "car-scraper"
 APP_URL = "https://github.com/DexterKexter/car-scraper"
 
 SYSTEM_PROMPT = """You normalize used-car listing data scraped from various sites (Guazi, Encar, Kolesa, Autocango).
-For each input record, infer the canonical English brand and model name and extract trim/edition text.
+For each input record, infer canonical fields.
 
 RULES:
-- brand_canonical: standard English brand name. Examples: "Geely Auto" -> "Geely"; "land" -> "Land Rover"; "기아" -> "Kia"; "제네시스" -> "Genesis"; "KG모빌리티(쌍용)" -> "SsangYong".
-- model_canonical: standard English model name with proper capitalization. Examples: "rover range rover evoque" -> "Range Rover Evoque"; "auto preface" -> "Preface"; "카니발 4세대" -> "Carnival 4th Gen"; "ct5" -> "CT5".
-- trim: the edition/grade/package text. Strip the year, engine spec, and the words "Used", "Model", "Version", "Edition" if redundant. Examples: "Used Cadillac CT5 2021 28T Platinum Sport Model" -> "28T Platinum Sport"; "Used Geometry C 2022 400KM Commuter Version" -> "400KM Commuter"; "디젤 3.0 4WD 6인승" -> "3.0 Diesel 4WD 6-seat".
-- If a field cannot be reliably inferred, return an empty string.
-- Output via the provided JSON tool only.
+- brand_canonical: standard English brand name.
+  Examples: "Geely Auto" -> "Geely"; "land" -> "Land Rover"; "기아" -> "Kia";
+  "제네시스" -> "Genesis"; "KG모빌리티(쌍용)" -> "SsangYong"; "르노코리아(삼성)" -> "Renault Korea".
+
+- model_canonical: BARE model name only, no generation suffix, no chassis code.
+  Examples: "Sportage 5th Gen" -> "Sportage"; "Carnival 4th Gen" -> "Carnival";
+  "Sonata LF" -> "Sonata"; "Grandeur IG" -> "Grandeur"; "Elantra AD" -> "Elantra";
+  "All New Carnival" -> "Carnival"; "The New Morning" -> "Morning";
+  "GV80 Coupe" -> "GV80" (Coupe is body variant, put in trim);
+  "rover range rover evoque" -> "Range Rover Evoque" (Evoque is model);
+  "auto preface" -> "Preface"; "ct5" -> "CT5"; "셀토스" -> "Seltos".
+
+- generation: chassis code, generation number, or facelift marker.
+  Examples: "Sportage 5th Gen" -> "5th Gen"; "Sonata LF" -> "LF"; "Grandeur IG" -> "IG";
+  "Elantra AD" -> "AD"; "All New Carnival" -> "All New"; "The New Morning" -> "The New";
+  "카니발 4세대" -> "4세대"; "BMW 3 Series F30" -> "F30".
+  Empty string if no generation marker.
+
+- trim: edition / grade / package / body variant. Strip year, "Used", "Model", "Version", "Edition" redundant words.
+  Examples: "Used Cadillac CT5 2021 28T Platinum Sport Model" -> "28T Platinum Sport";
+  "Used Geometry C 2022 400KM Commuter Version" -> "400KM Commuter";
+  "디젤 3.0 4WD 6인승" -> "3.0 Diesel 4WD 6-seat";
+  "GV80 Coupe 2.5T Gasoline AWD" -> "Coupe 2.5T Gasoline AWD";
+  "9인승 노블레스" -> "9-seat Noblesse".
+
+- Empty string if a field cannot be inferred.
+- Output via the JSON tool only.
 """
 
 OUTPUT_SCHEMA = {
@@ -55,9 +77,10 @@ OUTPUT_SCHEMA = {
                     "id": {"type": "string"},
                     "brand_canonical": {"type": "string"},
                     "model_canonical": {"type": "string"},
+                    "generation": {"type": "string"},
                     "trim": {"type": "string"},
                 },
-                "required": ["id", "brand_canonical", "model_canonical", "trim"],
+                "required": ["id", "brand_canonical", "model_canonical", "generation", "trim"],
                 "additionalProperties": False,
             },
         }
@@ -162,6 +185,7 @@ def _call_openrouter(
             out[str(r_["id"])] = {
                 "brand_canonical": r_.get("brand_canonical", ""),
                 "model_canonical": r_.get("model_canonical", ""),
+                "generation": r_.get("generation", ""),
                 "trim": r_.get("trim", ""),
             }
     return out

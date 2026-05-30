@@ -45,21 +45,14 @@ class Listing:
     fuel: str = ""
     transmission: str = ""
     color: str = ""
-    price_man_won: float | None = None
-    price_krw: int | None = None
-    price_usd: float | None = None
+    price_amount: float | None = None
+    currency: str = "KRW"
     vin: str = ""
     city: str = ""
     options_standard: list[str] = field(default_factory=list)
     options_extra: list[str] = field(default_factory=list)
     photos: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
-
-
-def _krw_to_usd(man_won: float | None, rate: float = 1380.0) -> float | None:
-    if man_won is None:
-        return None
-    return round(man_won * 10000 / rate, 2)
 
 
 def _photo_urls(photos: list[dict]) -> list[str]:
@@ -129,9 +122,7 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
         mileage_km=int(card["Mileage"]) if card.get("Mileage") else None,
         fuel=card.get("FuelType", ""),
         transmission=card.get("Transmission", ""),
-        price_man_won=float(price_man) if price_man is not None else None,
-        price_krw=int(float(price_man) * 10000) if price_man is not None else None,
-        price_usd=_krw_to_usd(float(price_man)) if price_man is not None else None,
+        price_amount=int(float(price_man) * 10000) if price_man is not None else None,
         city=card.get("OfficeCityState", ""),
         photos=_photo_urls(card.get("Photos", [])),
     )
