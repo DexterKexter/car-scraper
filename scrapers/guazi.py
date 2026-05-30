@@ -73,6 +73,7 @@ class Listing:
     price_raw: str = ""
     price_amount: float | None = None
     currency: str = "USD"
+    is_auction: bool = False
     location: str = ""
     spec: dict = field(default_factory=dict)
     photos: list[str] = field(default_factory=list)
@@ -317,6 +318,10 @@ def enrich_detail(l: Listing) -> Listing:
             l.price_raw = f"{cur}{raw_price}"
             l.price_amount = price_f
         l.currency = cur
+
+    # detect auction lot — guazi marks auctionType:1 + bidPrice with $$ placeholder
+    if re.search(r'"auctionType"\s*:\s*1', joined) or re.search(r'"bidPrice"\s*:\s*"\$+', joined):
+        l.is_auction = True
 
     # Schema.org Car extras (from streamed payload — not in inline JSON-LD)
     if not l.fuel:
