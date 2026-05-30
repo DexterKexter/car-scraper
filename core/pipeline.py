@@ -58,6 +58,11 @@ def run_scrape(site: str, args) -> list[dict]:
         return scr.run(
             limit=args.limit, offset=args.offset,
             query=args.query, detail=not args.no_detail,
+            min_year=args.min_year, max_year=args.max_year,
+            min_price_man=args.min_price_man, max_price_man=args.max_price_man,
+            max_mileage_km=args.max_mileage_km, min_mileage_km=args.min_mileage_km,
+            fuel=args.fuel, transmission=args.transmission,
+            manufacturer=args.manufacturer, only_inspection=args.only_inspection,
         )
     raise SystemExit(f"unknown site: {site}")
 
@@ -79,7 +84,14 @@ def main():
     ap.add_argument("--grades", default="")
     # encar-specific
     ap.add_argument("--offset", type=int, default=0)
-    ap.add_argument("--query", default="(And.Hidden.N._.CarType.Y.)")
+    ap.add_argument("--query", default=None)
+    ap.add_argument("--min-price-man", type=int, help="encar: min price in 만원")
+    ap.add_argument("--max-price-man", type=int)
+    ap.add_argument("--min-mileage-km", type=int)
+    ap.add_argument("--fuel", default=None)
+    ap.add_argument("--transmission", default=None)
+    ap.add_argument("--manufacturer", default=None)
+    ap.add_argument("--only-inspection", action="store_true")
     args = ap.parse_args()
 
     site = args.site

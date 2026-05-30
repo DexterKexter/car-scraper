@@ -147,8 +147,49 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
     return l
 
 
-def run(limit: int = 10, query: str = "(And.Hidden.N._.CarType.Y.)",
-        offset: int = 0, detail: bool = True) -> list[dict]:
+def build_query(
+    min_year: int | None = None,
+    max_year: int | None = None,
+    min_price_man: int | None = None,
+    max_price_man: int | None = None,
+    max_mileage_km: int | None = None,
+    min_mileage_km: int | None = None,
+    fuel: str | None = None,            # 가솔린|디젤|LPG|하이브리드|전기
+    transmission: str | None = None,    # 오토|수동
+    manufacturer: str | None = None,    # 기아|현대|제네시스|...
+    only_inspection: bool = False,
+) -> str:
+    """Compose encar `q=` expression (dot-tree syntax)."""
+    clauses = ["Hidden.N.", "CarType.Y."]
+
+    if min_year is not None or max_year is not None:
+        lo = f"{min_year}01" if min_year else ""
+        hi = f"{max_year}12" if max_year else ""
+        clauses.append(f"Year.range({lo}..{hi}).")
+    if min_price_man is not None or max_price_man is not None:
+        lo = str(min_price_man) if min_price_man is not None else ""
+        hi = str(max_price_man) if max_price_man is not None else ""
+        clauses.append(f"Price.range({lo}..{hi}).")
+    if max_mileage_km is not None or min_mileage_km is not None:
+        lo = str(min_mileage_km) if min_mileage_km is not None else "0"
+        hi = str(max_mileage_km) if max_mileage_km is not None else ""
+        clauses.append(f"Mileage.range({lo}..{hi}).")
+    if fuel:
+        clauses.append(f"FuelType.{fuel}.")
+    if transmission:
+        clauses.append(f"Transmission.{transmission}.")
+    if manufacturer:
+        clauses.append(f"Manufacturer.{manufacturer}.")
+    if only_inspection:
+        clauses.append("Trust.Inspection.")
+
+    return "(And." + "_.".join(clauses) + ")"
+
+
+def run(limit: int = 10, query: str | None = None,
+        offset: int = 0, detail: bool = True, **filter_kw) -> list[dict]:
+    if query is None:
+        query = build_query(**filter_kw)
     with httpx.Client(follow_redirects=True) as client:
         cards = fetch_list(client, query=query, limit=limit, offset=offset)
         out: list[Listing] = []
@@ -167,13 +208,32 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--offset", type=int, default=0)
-    p.add_argument("--query", default="(And.Hidden.N._.CarType.Y.)",
-                   help="Encar filter expression, e.g. (And.Hidden.N._.(C.CarType.Y._.Manufacturer.기아.))")
+    p.add_argument("--query", default=None,
+                   help="Raw encar filter expression. If set, overrides all --min-*/--max-* flags.")
+    p.add_argument("--min-year", type=int)
+    p.add_argument("--max-year", type=int)
+    p.add_argument("--min-price-man", type=int,
+                   help="Min price in 만원 (1만원=10000 KRW). $8000 ≈ 1100")
+    p.add_argument("--max-price-man", type=int)
+    p.add_argument("--max-mileage-km", type=int)
+    p.add_argument("--min-mileage-km", type=int)
+    p.add_argument("--fuel", default=None,
+                   help="가솔린|디젤|LPG|하이브리드|전기")
+    p.add_argument("--transmission", default=None, help="오토|수동")
+    p.add_argument("--manufacturer", default=None,
+                   help="기아|현대|제네시스|쉐보레|쌍용|르노삼성 ...")
+    p.add_argument("--only-inspection", action="store_true",
+                   help="Only listings with Trust.Inspection")
     p.add_argument("--no-detail", action="store_true")
     p.add_argument("--out", default="out/encar.json")
     args = p.parse_args()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     data = run(limit=args.limit, offset=args.offset, query=args.query,
-               detail=not args.no_detail)
+               detail=not args.no_detail,
+               min_year=args.min_year, max_year=args.max_year,
+               min_price_man=args.min_price_man, max_price_man=args.max_price_man,
+               max_mileage_km=args.max_mileage_km, min_mileage_km=args.min_mileage_km,
+               fuel=args.fuel, transmission=args.transmission,
+               manufacturer=args.manufacturer, only_inspection=args.only_inspection)
     Path(args.out).write_text(json.dumps(data, ensure_ascii=False, indent=2))
     print(f"\nWrote {len(data)} listings -> {args.out}")
