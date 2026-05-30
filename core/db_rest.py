@@ -147,9 +147,16 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
         print(f"[db] +model {bslug}/{mslug} -> id={model_id}", file=sys.stderr)
     reg = r.get("registration_date") or ""
     reg_date = reg.replace(".", "-") + "-01" if reg and len(reg) == 7 else None
+    # location formats:
+    #  guazi: "Shijiazhuang, China"  -> city + country
+    #  encar: city only ("인천", "부산", "경기") via r["city"]
     loc = r.get("location") or ""
-    city = loc.split(",")[0].strip() if loc else None
-    country = loc.split(",")[-1].strip() if "," in loc else None
+    if loc:
+        city = loc.split(",")[0].strip() or None
+        country = loc.split(",")[-1].strip() if "," in loc else None
+    else:
+        city = r.get("city") or None
+        country = None
     return {
         "source": source,
         "source_id": r.get("listing_id") or r.get("source_id") or r.get("id"),
