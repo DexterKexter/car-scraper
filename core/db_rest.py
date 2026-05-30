@@ -181,15 +181,30 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
     else:
         city = r.get("city") or None
         country = r.get("country") or None
+
+    # Title for SEO + admin display. Source-language titles (Hangul / Hanzi
+    # from encar / guazi) are useless to users — rebuild from the normalized
+    # fields so og:title and admin tables are Latin. Raw scraper title lives
+    # in source_data for forensics.
+    complectation = r.get("complectation") or r.get("trim") or r.get("badge")
+    title_parts = [
+        mark,
+        mf if mf and mf != concrete else None,
+        concrete,
+        complectation,
+        str(r.get("year")) if r.get("year") else None,
+    ]
+    rebuilt_title = " ".join(p for p in title_parts if p).strip() or None
+
     return {
         "source": source,
         "source_id": r.get("listing_id") or r.get("source_id") or r.get("id"),
         "url": r.get("url"),
-        "title": r.get("title"),
+        "title": rebuilt_title,
         "mark": mark,
         "model_family": mf,
         "model": concrete,
-        "complectation": r.get("complectation") or r.get("trim") or r.get("badge"),
+        "complectation": complectation,
         "year": r.get("year"),
         "price_original": r.get("price_amount"),
         "price_currency": r.get("currency"),

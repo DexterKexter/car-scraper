@@ -179,7 +179,11 @@ the model_family/model fields keep the source name):
   Mitsubishi: "ASX"->"RVR" or "Outlander Sport", "Triton"->"L200",
               "Pajero Sport"->"Montero Sport".
   Haval:    "H Dog"->"Dargo", "Big Dog"->"Dargo", "Cool Dog"->"Jolion".
-  Hyundai:  "Avante"->"Elantra".
+  Hyundai:  "Avante"->"Elantra", "Staria"->"Staria" (NOT Starex - Staria
+            is the 2021+ successor, Starex was discontinued. Never collapse
+            them.), "Grandeur"->"Grandeur", "Sonata"->"Sonata".
+  Kia:      "스타리아"->Hyundai brand, never Kia. Korean katakana model names
+            translate as-is (카니발=Carnival, K7=K7, 그랜저=Grandeur).
   Volkswagen: "Santana"->"Santana" (China rebadge of Polo).
   BYD:      "Atto 3"->"Yuan Plus", "Seagull"->"Dolphin Mini" (export).
   Geely:    "Coolray"->"Coolray", "Atlas"->"Atlas", "Tugella"->"Tugella", "Emgrand"->"Emgrand".
