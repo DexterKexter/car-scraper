@@ -36,8 +36,22 @@ APP_NAME = "car-scraper"
 APP_URL = "https://github.com/DexterKexter/car-scraper"
 
 SYSTEM_PROMPT = """You normalize used-car listing data from sites Guazi, Encar, Kolesa, Autocango.
-For each input record output the canonical fields in this hierarchy:
-brand -> vehicle_class -> model -> generation -> trim.
+Output 4 canonical fields matching the target DB schema (cars table):
+  mark           — canonical English brand name (DB: cars.mark)
+  model_family   — kolesa-level aggregate model/class name. ALWAYS filled.
+                   For class-having brands: the class name ("C-Class", "5 Series", "ES").
+                   For all other brands: the bare model name ("Q3", "X5", "Camry", "HR-V").
+  model          — engine-spec variant when applicable; else equals model_family.
+                   Mercedes-Benz: "C 260 L", "E 250", "GLC 300", "AMG GT 63 S".
+                   BMW Series:   "530Li", "325Li", "740Li", "M340i".
+                   BMW X/M/i/Z:  same as model_family ("X5", "M3", "i7", "Z4").
+                   Lexus:        "ES 300h", "RX 350", "NX 250", "LX 600".
+                   Audi/Genesis/Cadillac/Volvo/Porsche/etc.: same as model_family.
+                   Toyota/Honda/Kia/Hyundai/mass-market: same as model_family.
+  complectation  — full trim/package/edition text remaining after model is extracted.
+                   "4MATIC AMG Line", "M Sport Package", "xDrive40i M Night",
+                   "35 TFSI Fashion Dynamic", "2.5 Hybrid XSE", "F Sport".
+
 Also output the matching kolesa.kz brand/model slug when given a candidate.
 
 CHINESE SUB-BRAND MAP (parent / sub-brand split):
@@ -112,9 +126,35 @@ JDM / CHINA-ONLY MODEL ALIAS MAP (map to the global/kolesa name when listing kol
 
 FIELDS:
 
+CLASS-HAVING BRANDS (model_family stores the class name, model stores the engine badge):
+  Mercedes-Benz classes: A-Class, B-Class, C-Class, E-Class, S-Class,
+    CLA-Class, CLS-Class, CL-Class, CLK-Class,
+    G-Class, GL-Class, GLA-Class, GLB-Class, GLC-Class, GLE-Class, GLS-Class,
+    M-Class (ML-Class), R-Class, SL-Class, SLK-Class, V-Class,
+    AMG GT, Maybach S-Class, Maybach GLS,
+    EQA, EQB, EQC, EQE, EQS, EQE SUV, EQS SUV,
+    Sprinter, Vito, Viano (commercial - model_family = the badge).
+  BMW series only:
+    1 Series, 2 Series, 2 Series Active Tourer, 2 Series Gran Coupe,
+    3 Series, 4 Series, 5 Series, 6 Series, 7 Series, 8 Series.
+    (BMW X1-X7, M2-M8, i3-iX, Z3, Z4, XM are NOT classes — model_family = the badge.)
+  Lexus families:
+    CT, ES, GS, GX, HS, IS, LC, LM, LS, LX, NX, RC, RX, RZ, SC, TX, UX.
+
+For ALL OTHER BRANDS (Audi, Genesis, Cadillac, Infiniti, Volvo, Porsche, Lincoln,
+Acura, Land Rover, Jaguar, Bentley, Rolls-Royce, Aston Martin, Ferrari, Lamborghini,
+McLaren, Maserati, Alfa Romeo, Toyota, Honda, Nissan, Mazda, Mitsubishi, Subaru,
+Suzuki, Hyundai, Kia, SsangYong, Daewoo, Ford, Chevrolet, Buick, Jeep, Ram, Dodge,
+Chrysler, GMC, Tesla, Rivian, Lucid, VW, Skoda, SEAT, Renault, Peugeot, Citroen,
+Fiat, Opel, Mini, Smart, Geely, BYD, Chery, Haval, Great Wall, Changan, GAC, Hongqi,
+FAW, Dongfeng, NIO, Xpeng, Li, Zeekr, BAIC, JAC, MG, Wuling, Voyah, Avatr, Aito,
+Luxeed, Denza, ONVO, Roewe, Maxus, Tank, Lynk & Co, Jetour, OMODA, EXEED, Jaecoo,
+Geometry, Mansory, LEVC, ВАЗ, ГАЗ, УАЗ, Москвич, etc.):
+  model_family = model = the bare model name (Q3, X5, Camry, HR-V, Sportage, Phantom, 488, 911).
+
 FIELDS:
 
-brand_canonical: standard English brand name.
+mark: standard English brand name.
   Examples: "Geely Auto"->"Geely", "land"->"Land Rover", "기아"->"Kia",
   "제네시스"->"Genesis", "KG모빌리티(쌍용)"->"SsangYong", "르노코리아(삼성)"->"Renault Korea",
   "쉐보레(GM대우)"->"Chevrolet", "벤츠"->"Mercedes-Benz", "奔驰"->"Mercedes-Benz",
@@ -213,18 +253,16 @@ OUTPUT_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "brand_canonical": {"type": "string"},
-                    "vehicle_class": {"type": "string"},
-                    "model_canonical": {"type": "string"},
-                    "generation": {"type": "string"},
-                    "trim": {"type": "string"},
+                    "mark": {"type": "string"},
+                    "model_family": {"type": "string"},
+                    "model": {"type": "string"},
+                    "complectation": {"type": "string"},
                     "kolesa_brand_slug": {"type": "string"},
                     "kolesa_model_slug": {"type": "string"},
                     "in_kolesa": {"type": "boolean"},
                 },
                 "required": [
-                    "id", "brand_canonical", "vehicle_class",
-                    "model_canonical", "generation", "trim",
+                    "id", "mark", "model_family", "model", "complectation",
                     "kolesa_brand_slug", "kolesa_model_slug", "in_kolesa",
                 ],
                 "additionalProperties": False,
@@ -342,11 +380,10 @@ def _call_openrouter(
     for r_ in parsed.get("results", []):
         if "id" in r_:
             out[str(r_["id"])] = {
-                "brand_canonical": r_.get("brand_canonical", ""),
-                "vehicle_class": r_.get("vehicle_class", ""),
-                "model_canonical": r_.get("model_canonical", ""),
-                "generation": r_.get("generation", ""),
-                "trim": r_.get("trim", ""),
+                "mark": r_.get("mark", ""),
+                "model_family": r_.get("model_family", ""),
+                "model": r_.get("model", ""),
+                "complectation": r_.get("complectation", ""),
                 "kolesa_brand_slug": r_.get("kolesa_brand_slug", ""),
                 "kolesa_model_slug": r_.get("kolesa_model_slug", ""),
                 "in_kolesa": bool(r_.get("in_kolesa", False)),
