@@ -58,18 +58,17 @@ jobs:
       - name: Show summary
         if: always()
         run: |
-          if [ -f out/encar.json ]; then
-            python -c "
-            import json
-            d = json.load(open('out/encar.json'))
-            print(f'Listings: {len(d)}')
-            for l in d:
-                bn = l.get('brand_canonical') or l['brand']
-                mn = l.get('model_canonical') or l['model']
-                tr = l.get('trim') or l['badge']
-                print(f'  - {bn} {mn} [{tr}] | {l[\"year_month\"]} | {l[\"mileage_km\"]}km | {l[\"price_man_won\"]}만 (~${l[\"price_usd\"]}) | vin={l[\"vin\"][:11]}')
-            "
-          fi
+          [ -f out/encar.json ] || exit 0
+          python <<'PY'
+          import json
+          d = json.load(open('out/encar.json'))
+          print(f'Listings: {len(d)}')
+          for l in d:
+              bn = l.get('brand_canonical') or l['brand']
+              mn = l.get('model_canonical') or l['model']
+              tr = l.get('trim') or l['badge']
+              print(f"  - {bn} {mn} [{tr}] | {l['year_month']} | {l['mileage_km']}km | {l['price_man_won']}만 (~${l['price_usd']}) | vin={l['vin'][:11]}")
+          PY
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -64,16 +64,18 @@ jobs:
       - name: Show summary
         if: always()
         run: |
-          if [ -f out/guazi.json ]; then
-            python -c "
-            import json
-            d = json.load(open('out/guazi.json'))
-            print(f'Listings: {len(d)}')
-            for l in d:
-                acc = 'ACC' if l['accident_free'] is False else 'ok'
-                print(f\"  [{l['grade'] or '-'}] {l['brand']} {l['model']} {l['year']} {l['fuel']} {l['mileage_km']}km {l['price_raw']} vin={l['vin_mask']} {acc}\")
-            "
-          fi
+          [ -f out/guazi.json ] || exit 0
+          python <<'PY'
+          import json
+          d = json.load(open('out/guazi.json'))
+          print(f'Listings: {len(d)}')
+          for l in d:
+              acc = 'ACC' if l.get('accident_free') is False else 'ok'
+              bn = l.get('brand_canonical') or l['brand']
+              mn = l.get('model_canonical') or l['model']
+              tr = l.get('trim') or ''
+              print(f"  [{l.get('grade') or '-'}] {bn} {mn} {l.get('year')} {l.get('fuel')} {l.get('mileage_km')}km {l.get('price_raw')} vin={l.get('vin') or l.get('vin_mask')} {acc} | trim={tr}")
+          PY
 
       - uses: actions/upload-artifact@v4
         if: always()
