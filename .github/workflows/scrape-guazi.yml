@@ -4,8 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       path:
-        description: "Listing path on en.guazi.com (e.g. /used-cars/, /used-cars/toyota/, /used-cars/bmw/x1/)"
+        description: "Path filter: /used-cars/, /used-cars/<brand>/, /used-cars/<brand>/<model>/, /used-cars/<body>/ (sedan|suv|hatchback|mini-van|pick-up|truck|van|wagon)"
         default: "/used-cars/"
+      filters:
+        description: "Query filters, space-separated key=value. Supported: price=MIN,MAX | horsepower=MIN,MAX | tradeType=buyItNow|sealedBid"
+        default: ""
       limit:
         description: "Number of listings"
         default: "10"
@@ -16,7 +19,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -36,19 +39,30 @@ jobs:
       - name: Run scraper
         env:
           PYTHONUNBUFFERED: "1"
+          PATH_ARG: ${{ github.event.inputs.path }}
+          FILTERS: ${{ github.event.inputs.filters }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          DETAIL: ${{ github.event.inputs.detail }}
         run: |
-          PATH_ARG="${{ github.event.inputs.path }}"
-          LIMIT="${{ github.event.inputs.limit }}"
-          DETAIL="${{ github.event.inputs.detail }}"
-          ARGS="--path $PATH_ARG --limit $LIMIT --out out/guazi.json"
+          FILTER_ARGS=""
+          for kv in $FILTERS; do FILTER_ARGS="$FILTER_ARGS -f $kv"; done
+          ARGS="--path $PATH_ARG --limit $LIMIT --out out/guazi.json $FILTER_ARGS"
           if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
+          echo "RUNNING: python -m scrapers.guazi $ARGS"
           python -m scrapers.guazi $ARGS
 
       - name: Show summary
         if: always()
         run: |
           if [ -f out/guazi.json ]; then
-            python -c "import json;d=json.load(open('out/guazi.json'));print(f'Listings: {len(d)}');[print(f'  - {l[\"brand\"]} {l[\"model\"]} {l[\"year\"]} {l[\"price_raw\"]}') for l in d]"
+            python -c "
+            import json
+            d = json.load(open('out/guazi.json'))
+            print(f'Listings: {len(d)}')
+            for l in d:
+                acc = 'ACC' if l['accident_free'] is False else 'ok'
+                print(f\"  [{l['grade'] or '-'}] {l['brand']} {l['model']} {l['year']} {l['fuel']} {l['mileage_km']}km {l['price_raw']} vin={l['vin_mask']} {acc}\")
+            "
           fi
 
       - uses: actions/upload-artifact@v4

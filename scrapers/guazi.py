@@ -113,32 +113,52 @@ def parse_slug(slug: str) -> dict:
     }
 
 
-def fetch_list(limit: int = 10, path: str = LIST_PATH) -> list[Listing]:
-    url = urljoin(BASE, path)
-    print(f"[guazi] list: {url}", file=sys.stderr)
-    page = StealthyFetcher.fetch(
-        url, headless=True, network_idle=True, humanize=True, wait=2500
-    )
-    print(f"[guazi] list status={page.status} bytes={len(page.body)}", file=sys.stderr)
-    body = page.body.decode("utf-8", "replace")
-    hrefs = []
-    seen = set()
-    for href in DETAIL_HREF_RE.findall(body):
-        if href in seen:
-            continue
-        seen.add(href)
-        hrefs.append(href)
-        if len(hrefs) >= limit:
-            break
-    print(f"[guazi] detail hrefs: {len(hrefs)}", file=sys.stderr)
+def _build_list_url(
+    path: str = LIST_PATH,
+    page_num: int = 1,
+    params: dict[str, str] | None = None,
+) -> str:
+    from urllib.parse import urlencode
+    q = dict(params or {})
+    if page_num and page_num != 1:
+        q["page"] = str(page_num)
+    base = urljoin(BASE, path)
+    return base + (("?" + urlencode(q, safe=",")) if q else "")
+
+
+def fetch_list(
+    limit: int = 10,
+    path: str = LIST_PATH,
+    params: dict[str, str] | None = None,
+    max_pages: int = 50,
+) -> list[Listing]:
     out: list[Listing] = []
-    for h in hrefs:
-        slug = Path(urlparse(h).path).stem
-        parsed = parse_slug(slug)
-        l = Listing(url=urljoin(BASE, h), slug=slug, **parsed) if parsed else Listing(
-            url=urljoin(BASE, h), slug=slug, listing_id=slug
+    seen: set[str] = set()
+    page_num = 1
+    while len(out) < limit and page_num <= max_pages:
+        url = _build_list_url(path, page_num, params)
+        print(f"[guazi] list p{page_num}: {url}", file=sys.stderr)
+        page = StealthyFetcher.fetch(
+            url, headless=True, network_idle=True, humanize=True, wait=2500
         )
-        out.append(l)
+        body = page.body.decode("utf-8", "replace")
+        hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
+        if not hrefs:
+            print(f"[guazi] no new hrefs on p{page_num}, stop", file=sys.stderr)
+            break
+        for h in hrefs:
+            seen.add(h)
+            slug = Path(urlparse(h).path).stem
+            parsed = parse_slug(slug)
+            if parsed:
+                l = Listing(url=urljoin(BASE, h), slug=slug, **parsed)
+            else:
+                l = Listing(url=urljoin(BASE, h), slug=slug, listing_id=slug)
+            out.append(l)
+            if len(out) >= limit:
+                break
+        page_num += 1
+    print(f"[guazi] total parsed: {len(out)}", file=sys.stderr)
     return out
 
 
@@ -311,9 +331,13 @@ def enrich_detail(l: Listing) -> Listing:
     return l
 
 
-def run(limit: int = 10, detail: bool = True, path: str = LIST_PATH) -> list[dict]:
-    listings = fetch_list(limit=limit, path=path)
-    print(f"[guazi] parsed: {len(listings)}", file=sys.stderr)
+def run(
+    limit: int = 10,
+    detail: bool = True,
+    path: str = LIST_PATH,
+    params: dict[str, str] | None = None,
+) -> list[dict]:
+    listings = fetch_list(limit=limit, path=path, params=params)
     if detail:
         for l in listings:
             try:
@@ -325,16 +349,36 @@ def run(limit: int = 10, detail: bool = True, path: str = LIST_PATH) -> list[dic
     return [asdict(l) for l in listings]
 
 
+def _parse_filter_args(items: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for it in items or []:
+        if "=" not in it:
+            continue
+        k, v = it.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
 if __name__ == "__main__":
     import argparse
 
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description=(
+            "Guazi.com (en.guazi.com) scraper.\n"
+            "Path filters: /used-cars/, /used-cars/<brand>/, /used-cars/<brand>/<model>/, "
+            "/used-cars/<body>/ (sedan|suv|hatchback|mini-van|pick-up|truck|van|wagon).\n"
+            "Query filters via -f: price=MIN,MAX  horsepower=MIN,MAX  tradeType=buyItNow|sealedBid"
+        )
+    )
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--no-detail", action="store_true")
-    p.add_argument("--path", default=LIST_PATH, help="e.g. /used-cars/ or /used-cars/toyota/")
+    p.add_argument("--path", default=LIST_PATH)
+    p.add_argument("-f", "--filter", action="append", default=[],
+                   help="Repeatable. key=value, e.g. -f price=5000,15000 -f horsepower=0,160")
     p.add_argument("--out", default="out/guazi.json")
     args = p.parse_args()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    data = run(limit=args.limit, detail=not args.no_detail, path=args.path)
+    params = _parse_filter_args(args.filter)
+    data = run(limit=args.limit, detail=not args.no_detail, path=args.path, params=params)
     Path(args.out).write_text(json.dumps(data, ensure_ascii=False, indent=2))
     print(f"\nWrote {len(data)} listings -> {args.out}")
