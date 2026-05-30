@@ -15,6 +15,9 @@ on:
       detail:
         description: "Enrich detail pages (true/false)"
         default: "true"
+      normalize:
+        description: "Run AI normalizer (needs OPENROUTER_API_KEY secret)"
+        default: "true"
 
 jobs:
   scrape:
@@ -50,6 +53,13 @@ jobs:
           if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
           echo "RUNNING: python -m scrapers.guazi $ARGS"
           python -m scrapers.guazi $ARGS
+
+      - name: AI normalize (brand/model/trim)
+        if: ${{ github.event.inputs.normalize == 'true' && env.OPENROUTER_API_KEY != '' }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python -m core.normalizer out/guazi.json out/guazi.json
 
       - name: Show summary
         if: always()
