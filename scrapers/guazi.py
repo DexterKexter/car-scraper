@@ -418,6 +418,9 @@ def enrich_detail(l: Listing) -> Listing:
     if color_match:
         l.color = color_match.group(1)
 
+    # Filter out promo/brand/tag images; keep only real car photos.
+    # Junk patterns: /files/brand/, /files/tag_img/, /ovp/ (overseas marketing).
+    JUNK_RE = re.compile(r"/files/|/ovp/")
     photos: list[str] = []
     if og_img := metas.get("og:image"):
         photos.append(og_img)
@@ -427,6 +430,7 @@ def enrich_detail(l: Listing) -> Listing:
     for src in re.findall(r'<img[^>]+src="(https://[^"]+\.(?:jpe?g|png|webp))', body):
         if src not in photos:
             photos.append(src)
+    photos = [p for p in photos if not JUNK_RE.search(p)]
     if photos:
         l.photos = photos[:30]
 
