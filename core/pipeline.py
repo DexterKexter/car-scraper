@@ -128,7 +128,10 @@ def main():
         return
     print(f"[pipeline] === DB UPSERT ===", file=sys.stderr)
     t2 = time.time()
-    key = os.getenv("SUPABASE_KEY") or db_rest.DEFAULT_KEY
+    key = os.getenv("SUPABASE_KEY")
+    if not key or not db_rest.SUPABASE_URL:
+        print("[pipeline] skip db (SUPABASE_URL/SUPABASE_KEY env not set)", file=sys.stderr)
+        return
     with httpx.Client(timeout=60.0) as client:
         bmap = db_rest.fetch_brand_map(client, key)
         mmap = db_rest.fetch_model_map(client, key, bmap)

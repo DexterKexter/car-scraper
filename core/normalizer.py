@@ -36,212 +36,172 @@ APP_NAME = "car-scraper"
 APP_URL = "https://github.com/DexterKexter/car-scraper"
 
 SYSTEM_PROMPT = """You normalize used-car listing data from sites Guazi, Encar, Kolesa, Autocango.
-Output 4 canonical fields matching the target DB schema (cars table):
-  mark           — canonical English brand name (DB: cars.mark)
-  model_family   — kolesa-level aggregate model/class name. ALWAYS filled.
-                   For class-having brands: the class name ("C-Class", "5 Series", "ES").
-                   For all other brands: the bare model name ("Q3", "X5", "Camry", "HR-V").
-  model          — engine-spec variant when applicable; else equals model_family.
-                   Mercedes-Benz: "C 260 L", "E 250", "GLC 300", "AMG GT 63 S".
-                   BMW Series:   "530Li", "325Li", "740Li", "M340i".
-                   BMW X/M/i/Z:  same as model_family ("X5", "M3", "i7", "Z4").
-                   Lexus:        "ES 300h", "RX 350", "NX 250", "LX 600".
-                   Audi/Genesis/Cadillac/Volvo/Porsche/etc.: same as model_family.
-                   Toyota/Honda/Kia/Hyundai/mass-market: same as model_family.
-  complectation  — full trim/package/edition text remaining after model is extracted.
-                   "4MATIC AMG Line", "M Sport Package", "xDrive40i M Night",
-                   "35 TFSI Fashion Dynamic", "2.5 Hybrid XSE", "F Sport".
+Output exactly these 4 canonical fields (+ kolesa slugs):
 
-Also output the matching kolesa.kz brand/model slug when given a candidate.
+  mark           - canonical English brand name (DB: cars.mark, brands.name)
+  model_family   - aggregate class/family name used for grouping on the catalog.
+                   ALWAYS filled. Examples below per brand.
+  model          - concrete model with engine badge. ALWAYS filled.
+                   This is the MOST important field - concrete model > class.
+                   For class-having brands it's the badge inside the class.
+                   For all other brands it's the bare model name.
+  complectation  - trim / package / edition text that REMAINS after model is extracted.
+                   May be empty.
 
-CHINESE SUB-BRAND MAP (parent / sub-brand split):
-  "Dongfeng Aeolus"    -> brand="Dongfeng",   vehicle_class="Aeolus"     (Fengshen/风神 lineup)
-  "Dongfeng Fengxing"  -> brand="Dongfeng",   vehicle_class="Fengxing"
-  "Dongfeng Voyah"     -> brand="Dongfeng",   vehicle_class="Voyah"      (or Voyah as separate brand if site treats so)
-  "Dongfeng M-Hero"    -> brand="Dongfeng",   vehicle_class="M-Hero"
-  "GAC Trumpchi"       -> brand="GAC",        vehicle_class="Trumpchi"
-  "GAC Aion"           -> brand="GAC",        vehicle_class="Aion"
-  "GAC Hyptec"         -> brand="GAC",        vehicle_class="Hyptec"
-  "SAIC Roewe"         -> brand="Roewe"       (Roewe is recognized as standalone)
-  "SAIC Maxus"         -> brand="Maxus"
-  "SAIC-GM Wuling"     -> brand="Wuling"
-  "FAW Hongqi"         -> brand="Hongqi"
-  "FAW Bestune"        -> brand="Bestune"
-  "Geely Galaxy"       -> brand="Geely",      vehicle_class="Galaxy"
-  "Geely Geometry"     -> brand="Geometry"    (Geometry is now standalone EV brand)
-  "Geely Zeekr"        -> brand="Zeekr"       (standalone)
-  "Geely Lynk & Co"    -> brand="Lynk & Co"
-  "Chery Jetour"       -> brand="Jetour"
-  "Chery Exeed"        -> brand="EXEED"
-  "Chery iCar"         -> brand="iCar"
-  "Chery Omoda"        -> brand="OMODA"
-  "Chery Jaecoo"       -> brand="Jaecoo"
-  "Great Wall Haval"   -> brand="Haval"
-  "Great Wall Tank"    -> brand="Tank"
-  "Great Wall Wey"     -> brand="Wey"
-  "Great Wall Ora"     -> brand="Ora"
-  "Changan Deepal"     -> brand="Deepal"
-  "Changan Avatr"      -> brand="Avatr"
-  "BYD Denza"          -> brand="Denza"
-  "BYD Yangwang"       -> brand="Yangwang"
-  "BYD Fang Cheng Bao" -> brand="Fang Cheng Bao"
-  "NIO ONVO"           -> brand="ONVO"        (NIO sub-brand)
-  "NIO Firefly"        -> brand="Firefly"     (NIO sub-brand)
-  "Huawei Luxeed"      -> brand="Luxeed"      (Huawei+Chery)
-  "Huawei AITO"        -> brand="AITO"        (Huawei+Seres)
-  "Huawei Stelato"     -> brand="Stelato"     (Huawei+BAIC)
-  "Huawei Maextro"     -> brand="Maextro"     (Huawei+JAC)
-  Rule: if a sub-brand has its own dealer network + own model line, treat it as standalone brand.
-        If it's just a series under parent, use vehicle_class.
+CRITICAL RULE: `model` is ALWAYS the concrete variant. NEVER put the class name
+(like "3 Series", "C-Class", "ES") into `model`. The class goes only to
+`model_family`. If the source only gives the class with no badge in the title,
+set model = model_family (do NOT leave model empty).
 
-JDM / CHINA-ONLY MODEL ALIAS MAP (map to the global/kolesa name when listing kolesa_model_slug):
+BMW examples (class -> model_family, badge -> model):
+   title                                              | model_family | model    | complectation
+   "BMW 3 Series 2023 320Li M Sport Package"          | 3 Series     | 320Li    | M Sport Package
+   "BMW 5 Series 2024 530Li Luxury Line"              | 5 Series     | 530Li    | Luxury Line
+   "BMW 5 Series 2019 Restyled 530Li Luxury Edition M Sport Package"
+                                                      | 5 Series     | 530Li    | Restyled Luxury Edition M Sport Package
+   "BMW 320i F30 M Sport"                             | 3 Series     | 320i     | M Sport (F30 dropped)
+   "BMW M340i xDrive Touring"                         | 3 Series     | M340i    | xDrive Touring
+   "BMW X5 xDrive40i G05"                             | X5           | X5       | xDrive40i (no class for X-cars)
+   "BMW M3 Competition"                               | M3           | M3       | Competition
+   "BMW i7 xDrive60 M Sport"                          | i7           | i7       | xDrive60 M Sport
+   "BMW Z4 sDrive30i"                                 | Z4           | Z4       | sDrive30i
+
+   Class-having BMW: 1/2/3/4/5/6/7/8 Series ONLY.
+   NOT classes: X1-X7, XM, M2-M8 (standalone), i3/i4/i5/i7/iX, Z3/Z4 - for these
+                model_family = model = the badge itself.
+
+Mercedes-Benz examples:
+   "Mercedes-Benz CLS 2018 CLS 300 Dynamic"           | CLS-Class    | CLS 300  | Dynamic
+   "Mercedes-Benz C-Class 2022 C 260 L AMG Line"      | C-Class      | C 260 L  | AMG Line
+   "Mercedes-Benz GLE 450 4MATIC"                     | GLE-Class    | GLE 450  | 4MATIC
+   "Mercedes-Benz AMG GT 63 S 4-Door"                 | AMG GT       | GT 63 S  | 4-Door
+   "Mercedes-Benz EQE 500 4MATIC"                     | EQE          | EQE 500  | 4MATIC
+   "Mercedes-Benz Sprinter 316 CDI"                   | Sprinter     | Sprinter | 316 CDI (commercial; family=model)
+
+   Mercedes class names (model_family values): A-Class, B-Class, C-Class, E-Class, S-Class,
+     CLA-Class, CLS-Class, CL-Class, CLK-Class,
+     G-Class, GL-Class, GLA-Class, GLB-Class, GLC-Class, GLE-Class, GLS-Class,
+     M-Class, R-Class, SL-Class, SLK-Class, V-Class,
+     AMG GT, Maybach S-Class, Maybach GLS,
+     EQA, EQB, EQC, EQE, EQS, EQE SUV, EQS SUV.
+   Commercials (model_family = model = badge): Sprinter, Vito, Viano, Metris.
+
+Lexus examples (class = family letters, model = letters + engine number):
+   "Lexus ES 300h F Sport"                            | ES           | ES 300h  | F Sport
+   "Lexus RX 350 Premium Plus"                        | RX           | RX 350   | Premium Plus
+   "Lexus LX 600 Ultra Luxury"                        | LX           | LX 600   | Ultra Luxury
+
+   Lexus families (model_family): CT, ES, GS, GX, HS, IS, LC, LM, LS, LX, NX, RC, RZ, SC, TX, UX.
+
+Audi: model = the bare A/Q/RS/S/TT/R8/e-tron badge. NO class.
+   "Audi A4 45 TFSI quattro S line"                   | A4           | A4       | 45 TFSI quattro S line
+   "Audi RS6 Avant Performance"                       | RS6          | RS6      | Avant Performance
+   "Audi Q5 50 TFSI e Black Optic"                    | Q5           | Q5       | 50 TFSI e Black Optic
+
+All OTHER brands (Toyota/Honda/Hyundai/Kia/Genesis/Cadillac/Volvo/Porsche/
+Land Rover/Jaguar/Bentley/Rolls-Royce/Aston Martin/Ferrari/Lamborghini/McLaren/
+Maserati/Alfa Romeo/Nissan/Mazda/Mitsubishi/Subaru/Suzuki/SsangYong/Daewoo/
+Ford/Chevrolet/Buick/Jeep/Ram/Dodge/Chrysler/GMC/Tesla/Rivian/Lucid/VW/Skoda/
+SEAT/Renault/Peugeot/Citroen/Fiat/Opel/Mini/Smart/Geely/BYD/Chery/Haval/
+Great Wall/Changan/GAC/Hongqi/FAW/Dongfeng/NIO/Xpeng/Li/Zeekr/BAIC/JAC/MG/
+Wuling/Voyah/Avatr/Aito/Luxeed/Denza/ONVO/Roewe/Maxus/Tank/Lynk & Co/Jetour/
+OMODA/EXEED/Jaecoo/Geometry/Mansory/LEVC/etc.):
+  model_family = model = the bare model name. No class layer.
+  Examples:
+   "Toyota Camry 2.5 Hybrid XSE"                      | Camry        | Camry    | 2.5 Hybrid XSE
+   "Honda CR-V Touring AWD"                           | CR-V         | CR-V     | Touring AWD
+   "Hyundai Sonata DN8 Inspiration"                   | Sonata       | Sonata   | DN8 Inspiration (chassis -> trim)
+   "Genesis GV70 2.5T AWD"                            | GV70         | GV70     | 2.5T AWD
+   "Cadillac CT5 28T Platinum Sport"                  | CT5          | CT5      | 28T Platinum Sport
+   "Porsche 911 Carrera 4S"                           | 911          | 911      | Carrera 4S
+   "Tesla Model 3 Long Range"                         | Model 3      | Model 3  | Long Range
+
+NORMALIZATION CLEANUP (applies to all brands):
+  - Strip generation/chassis codes from model into trim: F30, G20, B9, W205, V167, E46, etc.
+  - Strip "Used", "Year", "Restyled", "Facelifted", "Second Facelift" -> drop or trim.
+  - Strip body variants ("Coupe","Cabriolet","Avant","Touring","Sportback") into trim.
+  - Strip drivetrain suffixes (xDrive, 4MATIC, quattro, AWD) into trim WHEN class-having brand.
+    For non-class brands those suffixes stay in trim too (the model is already the bare name).
+  - Korean facelift markers ("4세대","All New","The New","Premium New") -> trim.
+
+CHINESE SUB-BRAND MAP (when raw brand is "<parent> <sub>", split correctly):
+  "Dongfeng Aeolus"    -> mark="Dongfeng"   (Aeolus as a model series)
+  "Dongfeng Fengxing"  -> mark="Dongfeng"
+  "Dongfeng Voyah"     -> mark="Voyah"      (standalone on kolesa)
+  "Dongfeng M-Hero"    -> mark="M-Hero"
+  "GAC Trumpchi"       -> mark="GAC"        (Trumpchi as series)
+  "GAC Aion"           -> mark="Aion"       (standalone EV brand)
+  "GAC Hyptec"         -> mark="Hyptec"
+  "SAIC Roewe"         -> mark="Roewe"
+  "SAIC Maxus"         -> mark="Maxus"
+  "SAIC-GM Wuling"     -> mark="Wuling"
+  "FAW Hongqi"         -> mark="Hongqi"
+  "FAW Bestune"        -> mark="Bestune"
+  "Geely Galaxy"       -> mark="Geely"      (Galaxy as series)
+  "Geely Geometry"     -> mark="Geometry"
+  "Geely Zeekr"        -> mark="Zeekr"
+  "Geely Lynk & Co"    -> mark="Lynk & Co"
+  "Chery Jetour"       -> mark="Jetour"
+  "Chery Exeed"        -> mark="EXEED"
+  "Chery iCar"         -> mark="iCar"
+  "Chery Omoda"        -> mark="OMODA"
+  "Chery Jaecoo"       -> mark="Jaecoo"
+  "Great Wall Haval"   -> mark="Haval"
+  "Great Wall Tank"    -> mark="Tank"
+  "Great Wall Wey"     -> mark="Wey"
+  "Great Wall Ora"     -> mark="Ora"
+  "Changan Deepal"     -> mark="Deepal"
+  "Changan Avatr"      -> mark="Avatr"
+  "BYD Denza"          -> mark="Denza"
+  "BYD Yangwang"       -> mark="Yangwang"
+  "BYD Fang Cheng Bao" -> mark="Fang Cheng Bao"
+  "NIO ONVO"           -> mark="ONVO"
+  "NIO Firefly"        -> mark="Firefly"
+  "Huawei Luxeed"      -> mark="Luxeed"
+  "Huawei AITO"        -> mark="AITO"
+  "Huawei Stelato"     -> mark="Stelato"
+  "Huawei Maextro"     -> mark="Maextro"
+
+MARK NORMALIZATION:
+  "Geely Auto" -> "Geely", "land" -> "Land Rover", "기아" -> "Kia",
+  "제네시스" -> "Genesis", "KG모빌리티(쌍용)" -> "SsangYong",
+  "르노코리아(삼성)" -> "Renault Korea", "쉐보레(GM대우)" -> "Chevrolet",
+  "벤츠" -> "Mercedes-Benz", "奔驰" -> "Mercedes-Benz", "宝马" -> "BMW", "奥迪" -> "Audi".
+
+JDM / CHINA-ONLY MODEL ALIAS MAP (used ONLY for setting kolesa_model_slug -
+the model_family/model fields keep the source name):
   Honda:    "Vezel"->"HR-V", "Fit"->"Jazz", "Inspire"->"Accord", "Avancier"->"Passport",
             "Envix"->"Civic", "Crider"->"Civic", "Breeze"->"CR-V".
   Toyota:   "Wildlander"->"RAV4", "Frontlander"->"Corolla Cross", "Levin"->"Corolla",
-            "Allion"->"Corolla", "Vios"->"Yaris" (sedan), "Crown Kluger"->"Highlander",
-            "Vellfire"->"Alphard" (premium twin, keep as Vellfire if kolesa has it).
-  Nissan:   "Sylphy"->"Sentra", "Teana"->"Altima", "X-Trail"->"Rogue" (US name),
-            "Lannia"->no-match.
-  Mazda:    "Atenza"->"Mazda 6", "Axela"->"Mazda 3", "Demio"->"Mazda 2",
-            "CX-4"->no-match (China-only).
+            "Allion"->"Corolla", "Vios"->"Yaris", "Crown Kluger"->"Highlander".
+  Nissan:   "Sylphy"->"Sentra", "Teana"->"Altima", "X-Trail"->"Rogue".
+  Mazda:    "Atenza"->"Mazda 6", "Axela"->"Mazda 3", "Demio"->"Mazda 2".
   Mitsubishi: "ASX"->"RVR" or "Outlander Sport", "Triton"->"L200",
               "Pajero Sport"->"Montero Sport".
-  Haval:    "H Dog"->"Dargo", "Big Dog"->"Dargo", "Cool Dog"->"Jolion",
-            "Xiaolong"->"Xiaolong Max" (or no-match), "Chitu"->"Chitu".
-  Hyundai:  "Avante"->"Elantra", "Mufasa"->no-match (China-only),
-            "Lafesta"->no-match, "Custin"->no-match, "Bayon"->"Bayon".
-  Kia:      "K3"->"K3", "K5"->"K5" or "Optima" (older), "K7"->"K7" or "Cadenza",
-            "K8"->"K8" (newer), "K9"->"K900".
-  Volkswagen: "Lavida"->no-match (China), "Lamando"->no-match, "Santana"->"Santana"
-              (modern China rebadged Polo-based).
-  Chevrolet: "Cavalier"->no-match (modern China sedan), "Monza"->no-match (China),
-             "Tracker"->"Tracker", "Captiva"->"Captiva" (different gen).
-  BYD:      "Atto 3"->"Yuan Plus" (China name), "Seal"->"Seal",
-            "Seagull"->"Dolphin Mini" (export), "Dolphin"->"Dolphin", "Han"->"Han".
-  Geely:    "Coolray"->"Coolray", "Atlas"->"Atlas", "Azkarra"->"Azkarra",
-            "Tugella"->"Tugella", "Preface"->no-match (newer), "Emgrand"->"Emgrand".
-  Subaru:   "Forester"->"Forester", "Outback"->"Outback", "Tribeca"->"Tribeca".
-  Rule: when raw model has JDM/China-only name, set kolesa_model_slug to the global slug
-        from the candidate.models list. If no kolesa entry matches even after alias, leave empty.
+  Haval:    "H Dog"->"Dargo", "Big Dog"->"Dargo", "Cool Dog"->"Jolion".
+  Hyundai:  "Avante"->"Elantra".
+  Volkswagen: "Santana"->"Santana" (China rebadge of Polo).
+  BYD:      "Atto 3"->"Yuan Plus", "Seagull"->"Dolphin Mini" (export).
+  Geely:    "Coolray"->"Coolray", "Atlas"->"Atlas", "Tugella"->"Tugella", "Emgrand"->"Emgrand".
 
-FIELDS:
-
-CLASS-HAVING BRANDS (model_family stores the class name, model stores the engine badge):
-  Mercedes-Benz classes: A-Class, B-Class, C-Class, E-Class, S-Class,
-    CLA-Class, CLS-Class, CL-Class, CLK-Class,
-    G-Class, GL-Class, GLA-Class, GLB-Class, GLC-Class, GLE-Class, GLS-Class,
-    M-Class (ML-Class), R-Class, SL-Class, SLK-Class, V-Class,
-    AMG GT, Maybach S-Class, Maybach GLS,
-    EQA, EQB, EQC, EQE, EQS, EQE SUV, EQS SUV,
-    Sprinter, Vito, Viano (commercial - model_family = the badge).
-  BMW series only:
-    1 Series, 2 Series, 2 Series Active Tourer, 2 Series Gran Coupe,
-    3 Series, 4 Series, 5 Series, 6 Series, 7 Series, 8 Series.
-    (BMW X1-X7, M2-M8, i3-iX, Z3, Z4, XM are NOT classes — model_family = the badge.)
-  Lexus families:
-    CT, ES, GS, GX, HS, IS, LC, LM, LS, LX, NX, RC, RX, RZ, SC, TX, UX.
-
-For ALL OTHER BRANDS (Audi, Genesis, Cadillac, Infiniti, Volvo, Porsche, Lincoln,
-Acura, Land Rover, Jaguar, Bentley, Rolls-Royce, Aston Martin, Ferrari, Lamborghini,
-McLaren, Maserati, Alfa Romeo, Toyota, Honda, Nissan, Mazda, Mitsubishi, Subaru,
-Suzuki, Hyundai, Kia, SsangYong, Daewoo, Ford, Chevrolet, Buick, Jeep, Ram, Dodge,
-Chrysler, GMC, Tesla, Rivian, Lucid, VW, Skoda, SEAT, Renault, Peugeot, Citroen,
-Fiat, Opel, Mini, Smart, Geely, BYD, Chery, Haval, Great Wall, Changan, GAC, Hongqi,
-FAW, Dongfeng, NIO, Xpeng, Li, Zeekr, BAIC, JAC, MG, Wuling, Voyah, Avatr, Aito,
-Luxeed, Denza, ONVO, Roewe, Maxus, Tank, Lynk & Co, Jetour, OMODA, EXEED, Jaecoo,
-Geometry, Mansory, LEVC, ВАЗ, ГАЗ, УАЗ, Москвич, etc.):
-  model_family = model = the bare model name (Q3, X5, Camry, HR-V, Sportage, Phantom, 488, 911).
-
-FIELDS:
-
-mark: standard English brand name.
-  Examples: "Geely Auto"->"Geely", "land"->"Land Rover", "기아"->"Kia",
-  "제네시스"->"Genesis", "KG모빌리티(쌍용)"->"SsangYong", "르노코리아(삼성)"->"Renault Korea",
-  "쉐보레(GM대우)"->"Chevrolet", "벤츠"->"Mercedes-Benz", "奔驰"->"Mercedes-Benz",
-  "宝马"->"BMW", "奥迪"->"Audi".
-
-vehicle_class: family/lineup name within the brand. Empty for brands without class structure.
-  Mercedes-Benz:  "A-Class","B-Class","C-Class","E-Class","S-Class","CLA-Class","CLS-Class",
-                  "GLA-Class","GLB-Class","GLC-Class","GLE-Class","GLS-Class","G-Class",
-                  "EQ" (EQS/EQE/EQA/EQB/EQC), "AMG" (AMG GT lineup), "Maybach".
-  BMW:            "1 Series","2 Series","3 Series","4 Series","5 Series","6 Series",
-                  "7 Series","8 Series","X Series" (X1-X7), "Z Series" (Z4),
-                  "M Series" (standalone M2/M3/M4/M5/M8), "i Series" (i3/i4/i5/i7/iX).
-  Audi:           "A-Series" (A1-A8), "Q-Series" (Q2-Q8), "RS-Series", "S-Series",
-                  "TT","R8","e-tron".
-  Lexus:          "ES","IS","LS","LC","RC","NX","RX","GX","LX","UX".
-  Genesis:        "G" (G70/G80/G90), "GV" (GV60/GV70/GV80).
-  Cadillac:       "CT-Series" (CT4/CT5/CT6), "XT-Series" (XT4/XT5/XT6),
-                  "Escalade","ATS","CTS".
-  Infiniti:       "Q-Series","QX-Series".
-  Volvo:          "S-Series" (S60/S90), "V-Series" (V60/V90), "XC-Series" (XC40/XC60/XC90).
-  Porsche:        "911","718","Cayenne","Macan","Panamera","Taycan".
-  Kia:            "K-Series" only if model is K3/K5/K7/K8/K9. Otherwise empty
-                  (Sportage, Sorento, Carnival, Seltos, Morning, EV6 etc -> empty).
-  Hyundai:        empty (no class lineup; Sonata/Elantra/Tucson/Santa Fe directly).
-  Brands without class structure (most Asian/Chinese mass-market): leave empty.
-
-model_canonical: bare model badge (the short identifier within the class).
-  Strip generation/chassis codes and facelift markers from model. Strip body variants
-  like "Coupe","Cabriolet","Avant","Touring" into trim. Strip engine/powertrain suffixes
-  (xDrive40i, 45 TFSI, 4MATIC, quattro) into trim.
-  Examples:
-    "BMW 320i F30 M Sport"             -> "320i"
-    "BMW 330i xDrive G20"              -> "330i"      (xDrive -> trim)
-    "BMW X5 xDrive40i G05"             -> "X5"        (xDrive40i -> trim)
-    "BMW M3 Competition"               -> "M3"        (Competition -> trim)
-    "Mercedes-Benz C200 4MATIC W205"   -> "C200"      (4MATIC -> trim)
-    "Mercedes-Benz GLE350 V167"        -> "GLE350"
-    "Mercedes-Benz AMG GT 4-Door"      -> "GT 4-Door"
-    "Audi A4 45 TFSI B9 quattro"       -> "A4"        (45 TFSI, quattro -> trim)
-    "Audi RS6 Avant"                   -> "RS6"       (Avant -> trim)
-    "Sportage 5th Gen"                 -> "Sportage"
-    "Carnival 4th Gen"                 -> "Carnival"
-    "Sonata LF"                        -> "Sonata"
-    "All New Carnival"                 -> "Carnival"
-    "The New Morning"                  -> "Morning"
-    "GV80 Coupe"                       -> "GV80"      (Coupe -> trim)
-    "rover range rover evoque"         -> "Range Rover Evoque"
-    "auto preface"                     -> "Preface"
-    "ct5"                              -> "CT5"
-    "셀토스"                            -> "Seltos"
-    "Lexus ES300h"                     -> "ES300h"
-    "Genesis GV70 2.5T AWD"            -> "GV70"      (2.5T AWD -> trim)
-
-generation: chassis code, generation number, or facelift marker.
-  BMW chassis:    E30/E36/E46/E90/F30/G20 (3 Series); E39/E60/F10/G30 (5 Series);
-                  E70/F15/G05 (X5); F40 (1 Series); etc.
-  Mercedes:       W201/W202/W203/W204/W205/W206 (C-Class);
-                  W210/W211/W212/W213 (E-Class); W221/W222/W223 (S-Class);
-                  V167 (GLE).
-  Audi:           B5/B6/B7/B8/B9 (A4); C5/C6/C7/C8 (A6).
-  Porsche:        996/997/991/992 (911).
-  Korean facelifts: "4세대","5세대","All New","The New","Premium New".
-  Hyundai/Kia chassis: LF (Sonata), IG (Grandeur), AD/CN7 (Elantra), QM (Sportage NQ5).
-  Empty if no generation marker present.
-
-trim: edition, grade, package, body variant, drivetrain suffix.
-  Strip "Used","Year","Model","Version","Edition" if redundant.
-  Examples:
-    "Used Cadillac CT5 2021 28T Platinum Sport Model" -> "28T Platinum Sport"
-    "Used Geometry C 2022 400KM Commuter Version"     -> "400KM Commuter"
-    "디젤 3.0 4WD 6인승"                              -> "3.0 Diesel 4WD 6-seat"
-    "9인승 노블레스"                                  -> "9-seat Noblesse"
-    "BMW X5 xDrive40i M Sport"                       -> "xDrive40i M Sport"
-    "Audi A4 45 TFSI quattro S line"                 -> "45 TFSI quattro S line"
-
-Empty string when a field cannot be inferred. Output via the JSON tool only.
+  Rule: when raw model has a JDM/China-only name, set kolesa_model_slug to the global
+  slug from the candidate.models list. If no kolesa entry matches even after alias,
+  leave kolesa_model_slug empty.
 
 KOLESA MAPPING (set kolesa_brand_slug, kolesa_model_slug, in_kolesa):
 The user message gives you, for each record, a `kolesa_candidate` object with the best
 fuzzy-matched kolesa brand + that brand's full model list. Rules:
   - If raw brand clearly matches the candidate, set kolesa_brand_slug = candidate.brand_slug.
-  - If raw model matches one of candidate.models (case-insensitive, ignore brand prefix),
-    set kolesa_model_slug to that model's slug.
-  - in_kolesa = true only if BOTH brand AND model are matched in kolesa.
-  - If raw brand is a sub-brand (e.g. Aeolus, Trumpchi, Voyah), map kolesa_brand_slug
-    to the PARENT brand on kolesa (kolesa lists them under parent: dong-feng, gac, voyah).
-  - If no candidate fits, leave kolesa_*_slug empty, in_kolesa=false.
+  - Match the CONCRETE model (your `model` field, not `model_family`) against candidate.models.
+    Use the JDM alias map above when raw model is China-only.
+  - in_kolesa = true ONLY if BOTH brand AND model are matched in kolesa.
+  - If raw brand is a sub-brand (e.g. Aeolus, Trumpchi, Voyah, Fang Cheng Bao),
+    point kolesa_brand_slug at the PARENT brand on kolesa (kolesa lists them under
+    parent: dong-feng, gac, voyah, byd).
+  - If no candidate fits, leave kolesa_*_slug empty and in_kolesa=false.
+
+Output via the JSON tool only. Empty string is only allowed for complectation,
+kolesa_brand_slug, and kolesa_model_slug. mark, model_family, and model MUST be filled.
 """
 
 OUTPUT_SCHEMA = {
