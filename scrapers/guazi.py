@@ -441,20 +441,31 @@ def run(
     max_mileage_km: int | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
+    grades: set[str] | None = None,
 ) -> list[dict]:
+    # if grade filter is requested, we must over-fetch candidates because
+    # grade is known only after detail enrichment
+    overfetch_mult = 4 if grades else 1
     listings = fetch_list(
-        limit=limit, path=path, params=params,
+        limit=limit * overfetch_mult, path=path, params=params,
         max_mileage_km=max_mileage_km, min_year=min_year, max_year=max_year,
     )
-    if detail:
-        for l in listings:
+    kept: list[Listing] = []
+    for l in listings:
+        if detail:
             try:
                 enrich_detail(l)
                 time.sleep(0.6)
             except Exception as e:
                 l.raw["detail_error"] = repr(e)
                 print(f"[guazi] err {l.url}: {e}", file=sys.stderr)
-    return [asdict(l) for l in listings]
+        if grades and (l.grade or "").upper() not in grades:
+            print(f"[guazi] skip grade={l.grade!r} ({l.url})", file=sys.stderr)
+            continue
+        kept.append(l)
+        if len(kept) >= limit:
+            break
+    return [asdict(l) for l in kept]
 
 
 def _parse_filter_args(items: list[str]) -> dict[str, str]:
@@ -487,13 +498,17 @@ if __name__ == "__main__":
                    help="Client-side: drop listings with higher mileage")
     p.add_argument("--min-year", type=int, default=None)
     p.add_argument("--max-year", type=int, default=None)
+    p.add_argument("--grades", default="",
+                   help="Comma-separated Guazi grades to keep (e.g. 'S,A'). Empty = all.")
     p.add_argument("--out", default="out/guazi.json")
     args = p.parse_args()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     params = _parse_filter_args(args.filter)
+    grades = {g.strip().upper() for g in args.grades.split(",") if g.strip()} or None
     data = run(
         limit=args.limit, detail=not args.no_detail, path=args.path, params=params,
         max_mileage_km=args.max_mileage_km, min_year=args.min_year, max_year=args.max_year,
+        grades=grades,
     )
     Path(args.out).write_text(json.dumps(data, ensure_ascii=False, indent=2))
     print(f"\nWrote {len(data)} listings -> {args.out}")
