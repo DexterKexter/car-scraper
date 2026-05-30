@@ -80,6 +80,36 @@ CHINESE SUB-BRAND MAP (parent / sub-brand split):
   Rule: if a sub-brand has its own dealer network + own model line, treat it as standalone brand.
         If it's just a series under parent, use vehicle_class.
 
+JDM / CHINA-ONLY MODEL ALIAS MAP (map to the global/kolesa name when listing kolesa_model_slug):
+  Honda:    "Vezel"->"HR-V", "Fit"->"Jazz", "Inspire"->"Accord", "Avancier"->"Passport",
+            "Envix"->"Civic", "Crider"->"Civic", "Breeze"->"CR-V".
+  Toyota:   "Wildlander"->"RAV4", "Frontlander"->"Corolla Cross", "Levin"->"Corolla",
+            "Allion"->"Corolla", "Vios"->"Yaris" (sedan), "Crown Kluger"->"Highlander",
+            "Vellfire"->"Alphard" (premium twin, keep as Vellfire if kolesa has it).
+  Nissan:   "Sylphy"->"Sentra", "Teana"->"Altima", "X-Trail"->"Rogue" (US name),
+            "Lannia"->no-match.
+  Mazda:    "Atenza"->"Mazda 6", "Axela"->"Mazda 3", "Demio"->"Mazda 2",
+            "CX-4"->no-match (China-only).
+  Mitsubishi: "ASX"->"RVR" or "Outlander Sport", "Triton"->"L200",
+              "Pajero Sport"->"Montero Sport".
+  Haval:    "H Dog"->"Dargo", "Big Dog"->"Dargo", "Cool Dog"->"Jolion",
+            "Xiaolong"->"Xiaolong Max" (or no-match), "Chitu"->"Chitu".
+  Hyundai:  "Avante"->"Elantra", "Mufasa"->no-match (China-only),
+            "Lafesta"->no-match, "Custin"->no-match, "Bayon"->"Bayon".
+  Kia:      "K3"->"K3", "K5"->"K5" or "Optima" (older), "K7"->"K7" or "Cadenza",
+            "K8"->"K8" (newer), "K9"->"K900".
+  Volkswagen: "Lavida"->no-match (China), "Lamando"->no-match, "Santana"->"Santana"
+              (modern China rebadged Polo-based).
+  Chevrolet: "Cavalier"->no-match (modern China sedan), "Monza"->no-match (China),
+             "Tracker"->"Tracker", "Captiva"->"Captiva" (different gen).
+  BYD:      "Atto 3"->"Yuan Plus" (China name), "Seal"->"Seal",
+            "Seagull"->"Dolphin Mini" (export), "Dolphin"->"Dolphin", "Han"->"Han".
+  Geely:    "Coolray"->"Coolray", "Atlas"->"Atlas", "Azkarra"->"Azkarra",
+            "Tugella"->"Tugella", "Preface"->no-match (newer), "Emgrand"->"Emgrand".
+  Subaru:   "Forester"->"Forester", "Outback"->"Outback", "Tribeca"->"Tribeca".
+  Rule: when raw model has JDM/China-only name, set kolesa_model_slug to the global slug
+        from the candidate.models list. If no kolesa entry matches even after alias, leave empty.
+
 FIELDS:
 
 FIELDS:
