@@ -20,6 +20,8 @@ from pathlib import Path
 
 import httpx
 
+from core.oxylabs import OxylabsWSA
+
 BASE = "https://kolesa.kz"
 BRAND_LIST_URL = f"{BASE}/cars/"
 HEADERS = {
@@ -35,7 +37,15 @@ ITEM_RE = re.compile(
 )
 
 
-def _get(client: httpx.Client, url: str, retries: int = 4, delay: float = 0.6) -> str | None:
+def _get(
+    client: httpx.Client | None,
+    url: str,
+    retries: int = 4,
+    delay: float = 0.6,
+    wsa: OxylabsWSA | None = None,
+) -> str | None:
+    if wsa and wsa.enabled:
+        return wsa.get(url)
     time.sleep(delay)
     for i in range(retries):
         try:
@@ -123,30 +133,12 @@ def fetch_brand_models(client: httpx.Client, brand: dict) -> dict:
     return {**brand, "models": models}
 
 
-def _proxy_url() -> str | None:
-    if env := os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"):
-        return env
-    user = os.getenv("OXYLABS_USERNAME")
-    pwd = os.getenv("OXYLABS_PASSWORD")
-    if not (user and pwd):
-        return None
-    host = os.getenv("OXYLABS_HOST", "pr.oxylabs.io")
-    port = os.getenv("OXYLABS_PORT", "7777")
-    country = os.getenv("OXYLABS_COUNTRY", "").strip()  # e.g. "kz", "us"
-    u = f"customer-{user}-cc-{country}" if country else f"customer-{user}"
-    return f"http://{u}:{pwd}@{host}:{port}"
-
-
 def build_catalog(workers: int = 3, brand_limit: int | None = None) -> dict:
-    proxy = _proxy_url()
-    if proxy:
-        safe = re.sub(r"://[^@]+@", "://***@", proxy)
-        print(f"[kolesa] using proxy {safe}", file=sys.stderr)
-    client_kw: dict = {"verify": True}
-    if proxy:
-        client_kw["proxy"] = proxy
-    with httpx.Client(**client_kw) as client:
-        html = _get(client, BRAND_LIST_URL)
+    wsa = OxylabsWSA(geo=os.getenv("OXYLABS_COUNTRY") or os.getenv("OXYLABS_GEO") or "Kazakhstan")
+    if wsa.enabled:
+        print(f"[kolesa] using Oxylabs Web Scraper API (geo={wsa.geo})", file=sys.stderr)
+    with httpx.Client() as client:
+        html = _get(client, BRAND_LIST_URL, wsa=wsa)
         if not html:
             raise SystemExit("Failed to fetch brand list page")
         brands = parse_brands(html)
@@ -154,8 +146,11 @@ def build_catalog(workers: int = 3, brand_limit: int | None = None) -> dict:
         if brand_limit:
             brands = brands[:brand_limit]
         out: dict[str, dict] = {}
+        def _fetch(b: dict) -> dict:
+            html = _get(client, b["url"], wsa=wsa)
+            return {**b, "models": parse_models(html, b["slug"]) if html else []}
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(fetch_brand_models, client, b): b for b in brands}
+            futs = {ex.submit(_fetch, b): b for b in brands}
             for i, fut in enumerate(as_completed(futs), 1):
                 b = fut.result()
                 out[b["slug"]] = b
