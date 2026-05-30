@@ -3,9 +3,9 @@ name: scrape-guazi
 on:
   workflow_dispatch:
     inputs:
-      city:
-        description: "Guazi city code (e.g. bj, sh, gz)"
-        default: "bj"
+      path:
+        description: "Listing path on en.guazi.com (e.g. /used-cars/, /used-cars/toyota/, /used-cars/bmw/x1/)"
+        default: "/used-cars/"
       limit:
         description: "Number of listings"
         default: "10"
@@ -37,10 +37,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          CITY="${{ github.event.inputs.city }}"
+          PATH_ARG="${{ github.event.inputs.path }}"
           LIMIT="${{ github.event.inputs.limit }}"
           DETAIL="${{ github.event.inputs.detail }}"
-          ARGS="--city $CITY --limit $LIMIT --out out/guazi.json"
+          ARGS="--path $PATH_ARG --limit $LIMIT --out out/guazi.json"
           if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
           python -m scrapers.guazi $ARGS
 
@@ -48,8 +48,7 @@ jobs:
         if: always()
         run: |
           if [ -f out/guazi.json ]; then
-            echo "Listings: $(python -c 'import json;print(len(json.load(open(\"out/guazi.json\"))))')"
-            head -c 2000 out/guazi.json
+            python -c "import json;d=json.load(open('out/guazi.json'));print(f'Listings: {len(d)}');[print(f'  - {l[\"brand\"]} {l[\"model\"]} {l[\"year\"]} {l[\"price_raw\"]}') for l in d]"
           fi
 
       - uses: actions/upload-artifact@v4
