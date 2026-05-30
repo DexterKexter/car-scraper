@@ -49,10 +49,7 @@ class Listing:
     price_krw: int | None = None
     price_usd: float | None = None
     vin: str = ""
-    vehicle_no: str = ""
-    office_city: str = ""
-    office_name: str = ""
-    dealer_name: str = ""
+    city: str = ""
     options_standard: list[str] = field(default_factory=list)
     options_extra: list[str] = field(default_factory=list)
     photos: list[str] = field(default_factory=list)
@@ -135,16 +132,13 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
         price_man_won=float(price_man) if price_man is not None else None,
         price_krw=int(float(price_man) * 10000) if price_man is not None else None,
         price_usd=_krw_to_usd(float(price_man)) if price_man is not None else None,
-        office_city=card.get("OfficeCityState", ""),
-        office_name=card.get("OfficeName", ""),
-        dealer_name=card.get("DealerName", ""),
+        city=card.get("OfficeCityState", ""),
         photos=_photo_urls(card.get("Photos", [])),
     )
     l.raw["list_keys"] = sorted(card.keys())
 
     if detail and "_err" not in detail:
         l.vin = detail.get("vin", "") or ""
-        l.vehicle_no = detail.get("vehicleNo", "") or ""
         cat = detail.get("category") or {}
         if cat.get("colorName"):
             l.color = cat["colorName"]
