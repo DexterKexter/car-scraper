@@ -1,0 +1,59 @@
+name: scrape-encar
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Number of listings"
+        default: "10"
+      offset:
+        description: "Pagination offset"
+        default: "0"
+      query:
+        description: "Encar filter expr (default = all visible cars)"
+        default: "(And.Hidden.N._.CarType.Y.)"
+      detail:
+        description: "Fetch per-id detail (true/false)"
+        default: "true"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          LIMIT="${{ github.event.inputs.limit }}"
+          OFFSET="${{ github.event.inputs.offset }}"
+          QUERY="${{ github.event.inputs.query }}"
+          DETAIL="${{ github.event.inputs.detail }}"
+          ARGS="--limit $LIMIT --offset $OFFSET --query $QUERY --out out/encar.json"
+          if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
+          python -m scrapers.encar $ARGS
+
+      - name: Show summary
+        if: always()
+        run: |
+          if [ -f out/encar.json ]; then
+            python -c "import json;d=json.load(open('out/encar.json'));print(f'Listings: {len(d)}');[print(f'  - {l[\"brand\"]} {l[\"model\"]} {l[\"badge\"]} | {l[\"year_month\"]} | {l[\"mileage_km\"]}km | {l[\"price_man_won\"]}만 (~${l[\"price_usd\"]}) | vin={l[\"vin\"][:11]}') for l in d]"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: encar-listings
+          path: out/encar.json
