@@ -9,7 +9,7 @@ import httpx
 
 SUPABASE_URL = "https://pdmbdclhqiqyoomeswxs.supabase.co"
 DEFAULT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBkbWJkY2xocWlxeW9vbWVzd3hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg2OTIyMDksImV4cCI6MjA5NDI2ODIwOX0.mgWZwf0EKutCllKwdmB6yB3NJSdFOCdfVmPBL55g89M"
-SOURCE_TAG = "guazi-scraper"
+SOURCE_TAG = "manual"  # tag for brands/models we have to create (when not in existing catalog)
 
 
 def slugify(s: str) -> str:
