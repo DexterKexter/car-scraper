@@ -60,6 +60,27 @@ def fuel_map(raw: str) -> str | None:
     return r
 
 
+def drive_map(raw: str | None) -> str | None:
+    """Normalize drivetrain to fwd / rwd / awd. Returns None if unknown."""
+    if not raw:
+        return None
+    s = raw.lower().strip()
+    if not s:
+        return None
+    if s in ("fwd", "rwd", "awd"):
+        return s
+    if "awd" in s or "4wd" in s or "4 wd" in s or "all" in s or "4매틱" in s \
+       or "4matic" in s or "quattro" in s or "xdrive" in s \
+       or "四驱" in s or "全时" in s:
+        return "awd"
+    if "rwd" in s or "rear" in s or "후륜" in s or "后驱" in s:
+        return "rwd"
+    if "fwd" in s or "front" in s or "2wd" in s or "2 wd" in s \
+       or "전륜" in s or "前驱" in s:
+        return "fwd"
+    return None
+
+
 def transmission_map(raw: str | None) -> str | None:
     """Normalize raw transmission to one of: automatic, manual, cvt, dct, amt.
 
@@ -271,7 +292,9 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
         "body_type": r.get("body_type") or None,
         "engine_type": fuel_map(r.get("fuel") or ""),
         "transmission_type": transmission_map(r.get("gearbox") or r.get("transmission")),
-        "drive_type": r.get("drive") or None,
+        "drive_type": drive_map(
+            r.get("drive") or r.get("drive_train") or r.get("complectation")
+        ),
         "displacement": _displacement(r.get("engine_l") or r.get("displacement")),
         "horse_power": int(r.get("horsepower_ps")) if r.get("horsepower_ps") else None,
         "seats": r.get("seats"),
