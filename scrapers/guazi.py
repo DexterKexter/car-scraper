@@ -49,6 +49,17 @@ class Listing:
     drive: str = ""
     seats: int | None = None
     color: str = ""
+    fuel: str = ""
+    production_date: str = ""
+    model_date: str = ""
+    grade: str = ""
+    vin_mask: str = ""
+    accident_free: bool | None = None
+    water_damage_free: bool | None = None
+    fire_damage_free: bool | None = None
+    has_inspection_report: bool | None = None
+    inspection_categories: list[dict] = field(default_factory=list)
+    inspection_status: str = ""
     price_raw: str = ""
     price_wan_yuan: float | None = None
     price_usd: float | None = None
@@ -137,6 +148,8 @@ JSONLD_RE = re.compile(
 META_RE = re.compile(
     r'<meta\s+(?:name|property)="([^"]+)"\s+content="([^"]*)"', re.IGNORECASE
 )
+NEXT_CHUNK_RE = re.compile(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)')
+REPORT_LITE_KEY = '"reportDetailLite"'
 INQUIRE_PRICE = 9999999.0
 
 
@@ -155,6 +168,44 @@ def _parse_metas(body: str) -> dict[str, str]:
     return {k.lower(): v for k, v in META_RE.findall(body)}
 
 
+def _join_next_chunks(body: str) -> str:
+    chunks = NEXT_CHUNK_RE.findall(body)
+    if not chunks:
+        return ""
+    return "".join(chunks).encode("utf-8", "replace").decode("unicode_escape", "ignore")
+
+
+def _extract_object_at(text: str, start: int) -> str | None:
+    """Read a balanced JSON object starting at the first '{' after `start`."""
+    try:
+        open_at = text.index("{", start)
+    except ValueError:
+        return None
+    depth = 0
+    for i in range(open_at, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at : i + 1]
+    return None
+
+
+def _parse_report_lite(joined: str) -> dict:
+    idx = joined.find(REPORT_LITE_KEY)
+    if idx < 0:
+        return {}
+    obj = _extract_object_at(joined, idx + len(REPORT_LITE_KEY))
+    if not obj:
+        return {}
+    try:
+        return json.loads(obj)
+    except json.JSONDecodeError:
+        return {}
+
+
 def enrich_detail(l: Listing) -> Listing:
     print(f"[guazi] detail: {l.url}", file=sys.stderr)
     page = StealthyFetcher.fetch(
@@ -165,6 +216,7 @@ def enrich_detail(l: Listing) -> Listing:
 
     metas = _parse_metas(body)
     ld = _parse_jsonld(body)
+    joined = _join_next_chunks(body)
 
     title = metas.get("og:title") or (ld.get("name") if ld else "")
     if title:
@@ -192,6 +244,51 @@ def enrich_detail(l: Listing) -> Listing:
                 if price_f is not None:
                     l.price_wan_yuan = price_f / 10000
 
+    # Schema.org Car extras (from streamed payload — not in inline JSON-LD)
+    if not l.fuel:
+        if (fm := re.search(r'"fuelType"\s*:\s*"([^"]+)"', joined)):
+            l.fuel = fm.group(1)
+    if (pd := re.search(r'"productionDate"\s*:\s*"([^"]+)"', joined)):
+        l.production_date = pd.group(1)
+    if (md := re.search(r'"vehicleModelDate"\s*:\s*"([^"]+)"', joined)):
+        l.model_date = md.group(1)
+
+    # additionalProperty: Grade, Inspection Status
+    for prop in re.finditer(
+        r'\{"@type":"PropertyValue","name":"([^"]+)","value":"([^"]+)"\}', joined
+    ):
+        name, value = prop.group(1), prop.group(2)
+        if name == "Grade":
+            l.grade = value
+        elif name == "Inspection Status":
+            l.inspection_status = value
+
+    # Inspection report block (reportDetailLite)
+    report = _parse_report_lite(joined)
+    base = report.get("baseInfo") or {}
+    if base:
+        l.vin_mask = base.get("vinMask", "") or ""
+        if not l.grade and base.get("level"):
+            l.grade = base["level"]
+        l.has_inspection_report = bool(base.get("guaziReport"))
+        for s in base.get("threeStateList", []) or []:
+            t = s.get("title", "").lower()
+            ok = not bool(s.get("state"))  # state=false means "no issues" → free=True
+            if "accident" in t:
+                l.accident_free = ok
+            elif "water" in t:
+                l.water_damage_free = ok
+            elif "fire" in t:
+                l.fire_damage_free = ok
+    if report.get("categoryList"):
+        l.inspection_categories = [
+            {"name": c.get("categoryName"),
+             "normal": c.get("normalCount"),
+             "abnormal": c.get("abnormalCount")}
+            for c in report["categoryList"]
+        ]
+
+    # Color: prefer slug match
     color_match = re.search(
         r"-(black|white|red|blue|silver|gray|grey|green|gold|brown|yellow|orange|purple)-",
         l.slug,
