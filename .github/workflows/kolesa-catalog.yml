@@ -30,6 +30,9 @@ jobs:
       - name: Build catalog
         env:
           PYTHONUNBUFFERED: "1"
+          OXYLABS_USERNAME: ${{ secrets.OXYLABS_USERNAME }}
+          OXYLABS_PASSWORD: ${{ secrets.OXYLABS_PASSWORD }}
+          OXYLABS_COUNTRY: ${{ vars.OXYLABS_COUNTRY }}
         run: |
           ARGS="--out out/kolesa_catalog.json --workers ${{ github.event.inputs.workers }}"
           if [ -n "${{ github.event.inputs.brand_limit }}" ]; then
