@@ -44,15 +44,25 @@ class Listing:
     model: str = ""
     year: int | None = None
     engine_l: float | None = None
+    engine_code: str = ""
+    horsepower_ps: float | None = None
     mileage_km: int | None = None
     gearbox: str = ""
     drive: str = ""
+    drive_train: str = ""
     seats: int | None = None
+    doors: int | None = None
     color: str = ""
+    body_type: str = ""
+    dimension_mm: str = ""
+    curb_weight_kg: int | None = None
+    steering: str = ""
     fuel: str = ""
     production_date: str = ""
+    registration_date: str = ""
     model_date: str = ""
     grade: str = ""
+    vin: str = ""
     vin_mask: str = ""
     accident_free: bool | None = None
     water_damage_free: bool | None = None
@@ -64,6 +74,7 @@ class Listing:
     price_wan_yuan: float | None = None
     price_usd: float | None = None
     location: str = ""
+    spec: dict = field(default_factory=dict)
     photos: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -237,6 +248,40 @@ def _parse_report_lite(joined: str) -> dict:
         return {}
 
 
+def _parse_spec_list(joined: str) -> dict:
+    """Extract the [{key,name,value}, ...] vehicle-spec array."""
+    anchor = joined.find('"key":"regDate"')
+    if anchor < 0:
+        anchor = joined.find('"key":"vin"')
+    if anchor < 0:
+        return {}
+    arr_start = joined.rfind("[", 0, anchor)
+    if arr_start < 0:
+        return {}
+    depth = 0
+    end = -1
+    for i in range(arr_start, len(joined)):
+        c = joined[i]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return {}
+    try:
+        items = json.loads(joined[arr_start:end])
+    except json.JSONDecodeError:
+        return {}
+    out: dict = {}
+    for it in items or []:
+        if isinstance(it, dict) and "key" in it:
+            out[it["key"]] = it.get("value")
+    return out
+
+
 def enrich_detail(l: Listing) -> Listing:
     print(f"[guazi] detail: {l.url}", file=sys.stderr)
     page = StealthyFetcher.fetch(
@@ -293,6 +338,54 @@ def enrich_detail(l: Listing) -> Listing:
             l.grade = value
         elif name == "Inspection Status":
             l.inspection_status = value
+
+    # Spec array (key/name/value list) — has reg date, location, engine code, etc.
+    spec = _parse_spec_list(joined)
+    if spec:
+        l.spec = spec
+        if v := spec.get("regDate"):
+            l.registration_date = str(v)
+        if v := spec.get("mfgDate"):
+            l.production_date = str(v) or l.production_date
+        if v := spec.get("modelYear"):
+            l.model_date = str(v) or l.model_date
+        if v := spec.get("engine"):
+            l.engine_code = str(v)
+        if v := spec.get("horsepower"):
+            l.horsepower_ps = _to_float(str(v))
+        if v := spec.get("driveType"):
+            l.drive_train = str(v)
+        if v := spec.get("bodyType"):
+            l.body_type = str(v)
+        if v := spec.get("doors"):
+            try:
+                l.doors = int(str(v))
+            except ValueError:
+                pass
+        if v := spec.get("exteriorColor"):
+            l.color = str(v).lower()
+        if v := spec.get("dimension"):
+            l.dimension_mm = str(v)
+        if v := spec.get("weight"):
+            try:
+                l.curb_weight_kg = int(str(v).replace(",", ""))
+            except ValueError:
+                pass
+        if v := spec.get("steering"):
+            l.steering = str(v)
+        if v := spec.get("location"):
+            l.location = str(v)
+        if v := spec.get("vin"):
+            l.vin = str(v)
+        if v := spec.get("fuel"):
+            l.fuel = str(v) or l.fuel
+        if v := spec.get("mileage"):
+            try:
+                km = int(str(v).replace(",", ""))
+                if not l.mileage_km:
+                    l.mileage_km = km
+            except ValueError:
+                pass
 
     # Inspection report block (reportDetailLite)
     report = _parse_report_lite(joined)
