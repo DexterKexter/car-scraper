@@ -120,14 +120,36 @@ def ensure_model(client, key, brand_id: int, slug: str, name: str,
     raise RuntimeError(f"ensure_model failed {r.status_code}: {r.text[:200]}")
 
 
+def _displacement(raw):
+    """Guazi's slug parser returns 0.0 for unknown engines (e.g. EVs with '00l').
+    Drop those to NULL so the UI shows '-' instead of '0.0 l'."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
                   client=None, key: str | None = None) -> dict | None:
+    """Map one normalized scraper record to a cars-table row.
+
+    Field contract (per AGENTS.md + normalizer.py):
+      mark            = brand canonical
+      model_family    = class label for grouping ("3 Series", "C-Class")
+      model           = concrete model badge ("320Li", "C 260") — wins over class
+      models.name FK  = the concrete model, NOT the class.
+    """
     mark = r.get("mark") or r.get("brand_canonical") or r.get("brand") or ""
     mf = r.get("model_family") or r.get("model") or ""
     if not (mark and mf):
         return None
+    # Concrete model wins. Empty -> fall back to family so the row still inserts.
+    concrete = (r.get("model") or "").strip() or mf
     bslug = slugify(mark)
-    mslug = slugify(mf)
+    mslug = slugify(concrete)  # FK keyed on concrete, not class
     brand_id = brand_map.get(bslug)
     if not brand_id and client:
         brand_id = ensure_brand(client, key, bslug, mark, r.get("kolesa_brand_slug"))
@@ -139,12 +161,12 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
     model_id = model_map.get((bslug, mslug))
     if not model_id and client:
         model_id = ensure_model(
-            client, key, brand_id, mslug, mf,
+            client, key, brand_id, mslug, concrete,
             r.get("kolesa_model_slug"), r.get("kolesa_brand_slug"),
             r.get("body_type"),
         )
         model_map[(bslug, mslug)] = model_id
-        print(f"[db] +model {bslug}/{mslug} -> id={model_id}", file=sys.stderr)
+        print(f"[db] +model {bslug}/{mslug} -> id={model_id} ({concrete})", file=sys.stderr)
     # reg_date: guazi gives "2021.04" (YYYY.MM); encar gives year_month "2021-04"
     reg = r.get("registration_date") or r.get("year_month") or ""
     reg_norm = reg.replace(".", "-")
@@ -167,7 +189,7 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
         "mark_original": r.get("brand"),
         "mark": mark,
         "model_family": mf,
-        "model": r.get("model") or mf,
+        "model": concrete,
         "series_original": r.get("badge") or None,
         "complectation": r.get("complectation") or r.get("trim") or r.get("badge"),
         "year": r.get("year"),
@@ -186,7 +208,7 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
         "transmission_original": r.get("transmission"),
         "drive_type": r.get("drive") or None,
         "drive_original": r.get("drive_train") or r.get("drive") or None,
-        "displacement": r.get("engine_l"),
+        "displacement": _displacement(r.get("engine_l") or r.get("displacement")),
         "horse_power": int(r.get("horsepower_ps")) if r.get("horsepower_ps") else None,
         "seats": r.get("seats"),
         "steering": r.get("steering") or None,
