@@ -478,12 +478,18 @@ def run(
 
 
 def _parse_filter_args(items: list[str]) -> dict[str, str]:
-    out: dict[str, str] = {}
+    """Default filters: tradeType=buyItNow (skip auctions).
+    User can override via -f tradeType=sealedBid or -f tradeType=all."""
+    out: dict[str, str] = {"tradeType": "buyItNow"}
     for it in items or []:
         if "=" not in it:
             continue
         k, v = it.split("=", 1)
-        out[k.strip()] = v.strip()
+        k, v = k.strip(), v.strip()
+        if k == "tradeType" and v.lower() == "all":
+            out.pop("tradeType", None)
+        else:
+            out[k] = v
     return out
 
 
