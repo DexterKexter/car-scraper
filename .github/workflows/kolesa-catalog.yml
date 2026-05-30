@@ -1,0 +1,57 @@
+name: kolesa-catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Parallel brand fetches (keep low to avoid bans)"
+        default: "3"
+      brand_limit:
+        description: "Cap brands fetched (empty = all)"
+        default: ""
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build catalog
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          ARGS="--out out/kolesa_catalog.json --workers ${{ github.event.inputs.workers }}"
+          if [ -n "${{ github.event.inputs.brand_limit }}" ]; then
+            ARGS="$ARGS --brand-limit ${{ github.event.inputs.brand_limit }}"
+          fi
+          python -m scrapers.kolesa_catalog $ARGS
+
+      - name: Summary
+        if: always()
+        run: |
+          [ -f out/kolesa_catalog.json ] || exit 0
+          python <<'PY'
+          import json
+          c = json.load(open('out/kolesa_catalog.json'))
+          print(f"Brands: {c['brand_count']}  Models: {c['model_count']}")
+          rows = sorted(c['brands'].values(), key=lambda b: -b['count'])[:25]
+          for b in rows:
+              print(f"  {b['name']:24} count={b['count']:>6}  models={len(b['models'])}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kolesa-catalog
+          path: out/kolesa_catalog.json
