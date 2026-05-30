@@ -5,24 +5,57 @@ on:
     inputs:
       limit:
         description: "Number of listings"
-        default: "10"
+        default: "20"
       offset:
         description: "Pagination offset"
         default: "0"
       query:
-        description: "Encar filter expr (default = all visible cars)"
-        default: "(And.Hidden.N._.CarType.Y.)"
+        description: "Encar filter expr (leave blank to use built-in default)"
+        default: ""
       detail:
         description: "Fetch per-id detail (true/false)"
         default: "true"
-      normalize:
-        description: "Run AI normalizer (needs OPENROUTER_API_KEY secret)"
-        default: "true"
+      min_year:
+        description: "Filter: min FormYear"
+        default: ""
+      max_year:
+        description: "Filter: max FormYear"
+        default: ""
+      min_price_man:
+        description: "Filter: min price (만원)"
+        default: ""
+      max_price_man:
+        description: "Filter: max price (만원)"
+        default: ""
+      min_mileage_km:
+        description: "Filter: min mileage"
+        default: ""
+      max_mileage_km:
+        description: "Filter: max mileage"
+        default: ""
+      fuel:
+        description: "Filter: fuel (가솔린/디젤/전기/하이브리드)"
+        default: ""
+      transmission:
+        description: "Filter: transmission"
+        default: ""
+      manufacturer:
+        description: "Filter: manufacturer"
+        default: ""
+      only_inspection:
+        description: "Only listings with inspection report"
+        default: "false"
+      no_db:
+        description: "Skip DB upsert (true = JSON artifact only)"
+        default: "false"
+  schedule:
+    # Daily at 18:00 UTC (23:00 Almaty / 03:00 Seoul). Stagger vs guazi.
+    - cron: "0 18 * * *"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -36,24 +69,54 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Restore normalizer cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/normalizer.sqlite
+          key: normalizer-cache-${{ github.run_id }}
+          restore-keys: |
+            normalizer-cache-
+
+      - name: Pipeline (scrape -> normalize -> upsert)
         env:
           PYTHONUNBUFFERED: "1"
-        run: |
-          LIMIT="${{ github.event.inputs.limit }}"
-          OFFSET="${{ github.event.inputs.offset }}"
-          QUERY="${{ github.event.inputs.query }}"
-          DETAIL="${{ github.event.inputs.detail }}"
-          ARGS="--limit $LIMIT --offset $OFFSET --query $QUERY --out out/encar.json"
-          if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
-          python -m scrapers.encar $ARGS
-
-      - name: AI normalize (brand/model/trim)
-        if: ${{ github.event.inputs.normalize == 'true' && env.OPENROUTER_API_KEY != '' }}
-        env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python -m core.normalizer out/encar.json out/encar.json
+          LIMIT="${{ github.event.inputs.limit || '20' }}"
+          OFFSET="${{ github.event.inputs.offset || '0' }}"
+          QUERY="${{ github.event.inputs.query }}"
+          DETAIL="${{ github.event.inputs.detail || 'true' }}"
+          MIN_YEAR="${{ github.event.inputs.min_year }}"
+          MAX_YEAR="${{ github.event.inputs.max_year }}"
+          MIN_PRICE="${{ github.event.inputs.min_price_man }}"
+          MAX_PRICE="${{ github.event.inputs.max_price_man }}"
+          MIN_MILEAGE="${{ github.event.inputs.min_mileage_km }}"
+          MAX_MILEAGE="${{ github.event.inputs.max_mileage_km }}"
+          FUEL="${{ github.event.inputs.fuel }}"
+          TRANSMISSION="${{ github.event.inputs.transmission }}"
+          MANUFACTURER="${{ github.event.inputs.manufacturer }}"
+          ONLY_INSPECTION="${{ github.event.inputs.only_inspection || 'false' }}"
+          NO_DB="${{ github.event.inputs.no_db || 'false' }}"
+
+          ARGS="encar --limit $LIMIT --offset $OFFSET --out out/encar.json"
+          [ -n "$QUERY" ] && ARGS="$ARGS --query \"$QUERY\""
+          [ "$DETAIL" = "false" ] && ARGS="$ARGS --no-detail"
+          [ -n "$MIN_YEAR" ] && ARGS="$ARGS --min-year $MIN_YEAR"
+          [ -n "$MAX_YEAR" ] && ARGS="$ARGS --max-year $MAX_YEAR"
+          [ -n "$MIN_PRICE" ] && ARGS="$ARGS --min-price-man $MIN_PRICE"
+          [ -n "$MAX_PRICE" ] && ARGS="$ARGS --max-price-man $MAX_PRICE"
+          [ -n "$MIN_MILEAGE" ] && ARGS="$ARGS --min-mileage-km $MIN_MILEAGE"
+          [ -n "$MAX_MILEAGE" ] && ARGS="$ARGS --max-mileage-km $MAX_MILEAGE"
+          [ -n "$FUEL" ] && ARGS="$ARGS --fuel \"$FUEL\""
+          [ -n "$TRANSMISSION" ] && ARGS="$ARGS --transmission \"$TRANSMISSION\""
+          [ -n "$MANUFACTURER" ] && ARGS="$ARGS --manufacturer \"$MANUFACTURER\""
+          [ "$ONLY_INSPECTION" = "true" ] && ARGS="$ARGS --only-inspection"
+          [ "$NO_DB" = "true" ] && ARGS="$ARGS --no-db"
+
+          echo "RUNNING: python -m core.pipeline $ARGS"
+          eval "python -m core.pipeline $ARGS"
 
       - name: Show summary
         if: always()
@@ -64,14 +127,12 @@ jobs:
           d = json.load(open('out/encar.json'))
           print(f'Listings: {len(d)}')
           for l in d:
-              bn = l.get('brand_canonical') or l['brand']
-              mn = l.get('model_canonical') or l['model']
-              tr = l.get('trim') or l['badge']
-              cls = l.get('vehicle_class') or ''
-              gen = l.get('generation') or ''
-              cls_s = f"[{cls}]" if cls else ""
-              gen_s = f"({gen})" if gen else ""
-              print(f"  - {bn} {cls_s} {mn} {gen_s} [{tr}] | {l['year_month']} | {l['mileage_km']}km | {l['city']} | {l['price_amount']} {l['currency']} | vin={l['vin']}")
+              mark = l.get('mark') or l.get('brand_canonical') or l['brand']
+              mf = l.get('model_family') or ''
+              mn = l.get('model') or ''
+              cmpl = l.get('complectation') or l.get('badge') or ''
+              mf_s = f"[{mf}]" if mf and mf != mn else ""
+              print(f"  - {mark} {mf_s} {mn} ({cmpl}) | {l.get('year_month')} | {l.get('mileage_km')}km | {l.get('city')} | {l.get('price_amount')} {l.get('currency')} | vin={l.get('vin')}")
           PY
 
       - uses: actions/upload-artifact@v4

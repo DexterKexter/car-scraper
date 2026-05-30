@@ -4,20 +4,33 @@ on:
   workflow_dispatch:
     inputs:
       path:
-        description: "Path filter: /used-cars/, /used-cars/<brand>/, /used-cars/<brand>/<model>/, /used-cars/<body>/ (sedan|suv|hatchback|mini-van|pick-up|truck|van|wagon)"
+        description: "Path filter: /used-cars/, /used-cars/<brand>/, /used-cars/<brand>/<model>/, /used-cars/<body>/"
         default: "/used-cars/"
       filters:
         description: "Query filters, space-separated key=value. Supported: price=MIN,MAX | horsepower=MIN,MAX | tradeType=buyItNow|sealedBid"
         default: ""
       limit:
         description: "Number of listings"
-        default: "10"
+        default: "30"
       detail:
         description: "Enrich detail pages (true/false)"
         default: "true"
-      normalize:
-        description: "Run AI normalizer (needs OPENROUTER_API_KEY secret)"
-        default: "true"
+      grades:
+        description: "Comma-separated Guazi grades to keep (e.g. 'S,A'). Empty = all."
+        default: ""
+      max_mileage_km:
+        description: "Drop listings with higher mileage. Empty = no cap."
+        default: ""
+      min_year:
+        description: "Drop listings older than this year. Empty = no cap."
+        default: ""
+      no_db:
+        description: "Skip DB upsert (true = JSON artifact only)"
+        default: "false"
+  schedule:
+    # Daily at 06:00 UTC (11:00 Almaty). Conservative cadence — adjust if the
+    # OpenRouter / Oxylabs budget allows more.
+    - cron: "0 6 * * *"
 
 jobs:
   scrape:
@@ -39,27 +52,43 @@ jobs:
       - name: Install scrapling browsers
         run: scrapling install
 
-      - name: Run scraper
+      # Persist normalizer cache between runs so we don't re-LLM repeated
+      # (site, brand, model, title) tuples. SHA256-keyed in core/normalizer.py.
+      - name: Restore normalizer cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/normalizer.sqlite
+          key: normalizer-cache-${{ github.run_id }}
+          restore-keys: |
+            normalizer-cache-
+
+      - name: Pipeline (scrape -> normalize -> upsert)
         env:
           PYTHONUNBUFFERED: "1"
-          PATH_ARG: ${{ github.event.inputs.path }}
-          FILTERS: ${{ github.event.inputs.filters }}
-          LIMIT: ${{ github.event.inputs.limit }}
-          DETAIL: ${{ github.event.inputs.detail }}
-        run: |
-          FILTER_ARGS=""
-          for kv in $FILTERS; do FILTER_ARGS="$FILTER_ARGS -f $kv"; done
-          ARGS="--path $PATH_ARG --limit $LIMIT --out out/guazi.json $FILTER_ARGS"
-          if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
-          echo "RUNNING: python -m scrapers.guazi $ARGS"
-          python -m scrapers.guazi $ARGS
-
-      - name: AI normalize (brand/model/trim)
-        if: ${{ github.event.inputs.normalize == 'true' && env.OPENROUTER_API_KEY != '' }}
-        env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python -m core.normalizer out/guazi.json out/guazi.json
+          # Build args. Cron runs use defaults; workflow_dispatch passes inputs.
+          PATH_ARG="${{ github.event.inputs.path || '/used-cars/' }}"
+          LIMIT="${{ github.event.inputs.limit || '30' }}"
+          FILTERS="${{ github.event.inputs.filters }}"
+          DETAIL="${{ github.event.inputs.detail || 'true' }}"
+          GRADES="${{ github.event.inputs.grades }}"
+          MAX_MILEAGE="${{ github.event.inputs.max_mileage_km }}"
+          MIN_YEAR="${{ github.event.inputs.min_year }}"
+          NO_DB="${{ github.event.inputs.no_db || 'false' }}"
+
+          ARGS="guazi --path $PATH_ARG --limit $LIMIT --out out/guazi.json"
+          for kv in $FILTERS; do ARGS="$ARGS -f $kv"; done
+          [ "$DETAIL" = "false" ] && ARGS="$ARGS --no-detail"
+          [ -n "$GRADES" ] && ARGS="$ARGS --grades $GRADES"
+          [ -n "$MAX_MILEAGE" ] && ARGS="$ARGS --max-mileage-km $MAX_MILEAGE"
+          [ -n "$MIN_YEAR" ] && ARGS="$ARGS --min-year $MIN_YEAR"
+          [ "$NO_DB" = "true" ] && ARGS="$ARGS --no-db"
+
+          echo "RUNNING: python -m core.pipeline $ARGS"
+          python -m core.pipeline $ARGS
 
       - name: Show summary
         if: always()
@@ -71,14 +100,12 @@ jobs:
           print(f'Listings: {len(d)}')
           for l in d:
               acc = 'ACC' if l.get('accident_free') is False else 'ok'
-              bn = l.get('brand_canonical') or l['brand']
-              mn = l.get('model_canonical') or l['model']
-              tr = l.get('trim') or ''
-              cls = l.get('vehicle_class') or ''
-              gen = l.get('generation') or ''
-              cls_s = f"[{cls}]" if cls else ""
-              gen_s = f"({gen})" if gen else ""
-              print(f"  [{l.get('grade') or '-'}] {bn} {cls_s} {mn} {gen_s} {l.get('year')} {l.get('fuel')} {l.get('mileage_km')}km {l.get('price_amount')} {l.get('currency')} vin={l.get('vin') or l.get('vin_mask')} {acc} | trim={tr}")
+              mark = l.get('mark') or l.get('brand_canonical') or l['brand']
+              mf = l.get('model_family') or ''
+              mn = l.get('model') or ''
+              cmpl = l.get('complectation') or ''
+              mf_s = f"[{mf}]" if mf and mf != mn else ""
+              print(f"  [{l.get('grade') or '-'}] {mark} {mf_s} {mn} ({cmpl}) {l.get('year')} {l.get('fuel')} {l.get('mileage_km')}km {l.get('price_amount')} {l.get('currency')} vin={l.get('vin') or l.get('vin_mask')} {acc}")
           PY
 
       - uses: actions/upload-artifact@v4
