@@ -15,6 +15,9 @@ on:
       detail:
         description: "Fetch per-id detail (true/false)"
         default: "true"
+      normalize:
+        description: "Run AI normalizer (needs OPENROUTER_API_KEY secret)"
+        default: "true"
 
 jobs:
   scrape:
@@ -45,11 +48,27 @@ jobs:
           if [ "$DETAIL" = "false" ]; then ARGS="$ARGS --no-detail"; fi
           python -m scrapers.encar $ARGS
 
+      - name: AI normalize (brand/model/trim)
+        if: ${{ github.event.inputs.normalize == 'true' && env.OPENROUTER_API_KEY != '' }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python -m core.normalizer out/encar.json out/encar.json
+
       - name: Show summary
         if: always()
         run: |
           if [ -f out/encar.json ]; then
-            python -c "import json;d=json.load(open('out/encar.json'));print(f'Listings: {len(d)}');[print(f'  - {l[\"brand\"]} {l[\"model\"]} {l[\"badge\"]} | {l[\"year_month\"]} | {l[\"mileage_km\"]}km | {l[\"price_man_won\"]}만 (~${l[\"price_usd\"]}) | vin={l[\"vin\"][:11]}') for l in d]"
+            python -c "
+            import json
+            d = json.load(open('out/encar.json'))
+            print(f'Listings: {len(d)}')
+            for l in d:
+                bn = l.get('brand_canonical') or l['brand']
+                mn = l.get('model_canonical') or l['model']
+                tr = l.get('trim') or l['badge']
+                print(f'  - {bn} {mn} [{tr}] | {l[\"year_month\"]} | {l[\"mileage_km\"]}km | {l[\"price_man_won\"]}만 (~${l[\"price_usd\"]}) | vin={l[\"vin\"][:11]}')
+            "
           fi
 
       - uses: actions/upload-artifact@v4
