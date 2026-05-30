@@ -8,6 +8,7 @@ Prices in 만원 (10,000 KRW).
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -71,9 +72,63 @@ def _photo_urls(photos: list[dict]) -> list[str]:
     out: list[str] = []
     for p in photos or []:
         loc = p.get("location") if isinstance(p, dict) else None
-        if loc:
-            out.append(PHOTO_HOST + loc)
+        if not loc:
+            continue
+        # Guard against absolute URLs (rare but possible) — only prefix
+        # PHOTO_HOST when the path starts with `/`.
+        if loc.startswith("http://") or loc.startswith("https://"):
+            out.append(loc)
+        else:
+            out.append(PHOTO_HOST + (loc if loc.startswith("/") else "/" + loc))
     return out
+
+
+def _iso_published(raw: str) -> str | None:
+    """Encar ModifiedDate looks like '2026-05-31 06:24:02.000 +09'.
+    Convert to ISO-8601 so Postgres timestamptz parses it cleanly.
+    Returns None for empty/unparseable input.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    # Drop milliseconds: '06:24:02.000 +09' -> '06:24:02 +09'
+    s = re.sub(r"\.\d+\b", "", s)
+    # Replace space-before-tz with nothing, then normalize tz: '+09' -> '+09:00'
+    m = re.match(
+        r"^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s*([+\-]\d{2}):?(\d{2})?$",
+        s,
+    )
+    if not m:
+        return s if "T" in s else None  # already ISO? best effort.
+    date_part, time_part, tz_hour, tz_min = m.groups()
+    return f"{date_part}T{time_part}{tz_hour}:{tz_min or '00'}"
+
+
+def _get_with_retry(client: httpx.Client, url: str, *, params=None,
+                    headers=None, timeout: float = 30.0,
+                    max_attempts: int = 3) -> httpx.Response:
+    """GET with exponential backoff on 429/503 / network errors."""
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            r = client.get(url, params=params, headers=headers, timeout=timeout)
+            if r.status_code in (429, 503):
+                wait = (2 ** attempt) * 1.0
+                print(f"[encar] {r.status_code} on {url} — backoff {wait}s "
+                      f"(attempt {attempt+1}/{max_attempts})", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            return r
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            last_exc = e
+            wait = (2 ** attempt) * 1.5
+            print(f"[encar] {type(e).__name__} on {url} — backoff {wait}s "
+                  f"(attempt {attempt+1}/{max_attempts})", file=sys.stderr)
+            time.sleep(wait)
+    if last_exc:
+        raise last_exc
+    # All attempts hit 429/503 — return last response so caller decides.
+    return r
 
 
 def fetch_list(
@@ -86,7 +141,7 @@ def fetch_list(
     sr = f"|{sort}|{offset}|{limit}"
     params = {"count": "true", "q": query, "sr": sr}
     print(f"[encar] list: {LIST_URL} q={query} sr={sr}", file=sys.stderr)
-    r = client.get(LIST_URL, params=params, headers=DEFAULT_HEADERS, timeout=30.0)
+    r = _get_with_retry(client, LIST_URL, params=params, headers=DEFAULT_HEADERS)
     r.raise_for_status()
     data = r.json()
     print(f"[encar] total={data.get('Count')} got={len(data.get('SearchResults', []))}",
@@ -96,10 +151,16 @@ def fetch_list(
 
 def fetch_detail(client: httpx.Client, listing_id: str) -> dict:
     url = DETAIL_URL.format(id=listing_id)
-    r = client.get(url, headers=DEFAULT_HEADERS, timeout=30.0)
+    try:
+        r = _get_with_retry(client, url, headers=DEFAULT_HEADERS)
+    except Exception as e:
+        return {"_err": f"{type(e).__name__}: {e}"}
     if r.status_code != 200:
         return {"_err": f"http {r.status_code}"}
-    return r.json()
+    try:
+        return r.json()
+    except Exception as e:
+        return {"_err": f"json: {e}"}
 
 
 def build_listing(card: dict, detail: dict | None = None) -> Listing:
@@ -136,8 +197,8 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
         transmission=card.get("Transmission", ""),
         price_amount=int(float(price_man) * 10000) if price_man is not None else None,
         city=card.get("OfficeCityState", ""),
-        published_at=card.get("ModifiedDate", ""),
-        photos=_photo_urls(card.get("Photos", [])),
+        published_at=_iso_published(card.get("ModifiedDate", "")) or "",
+        photos=_photo_urls(card.get("Photos", []))[:30],
     )
     l.raw["list_keys"] = sorted(card.keys())
 
@@ -170,14 +231,18 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
             "RV": "Minivan",        # Recreational Vehicle = MPV in Korea
             "Van": "Minivan",
             "Cargo": "Minivan",
+            "Box": "Minivan",
             "Full-size": "Sedan",
             "Mid-size": "Sedan",
             "Light": "Sedan",       # 경차 = "Light Car" — kei-class sedan
             "Compact": "Sedan",
             "Sub-compact": "Hatchback",
             "Small": "Hatchback",
+            "Wagon": "Wagon",
             "Sports": "Coupe",
             "Coupe": "Coupe",
+            "Truck": "Truck",       # pickup (Bongo / Porter)
+            "Pickup": "Truck",
         }
         if raw_body:
             l.body_type = ENCAR_BODY.get(raw_body, raw_body)
@@ -192,10 +257,25 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
         if isinstance(acc, dict):
             cnt = acc.get("count")
             if cnt is not None:
-                l.accident_free = (int(cnt) == 0)
-                l.owners_count = acc.get("ownerChanged")
+                try:
+                    l.accident_free = (int(cnt) == 0)
+                except (TypeError, ValueError):
+                    pass
+            oc = acc.get("ownerChanged")
+            if oc is not None:
+                try:
+                    l.owners_count = int(oc)
+                except (TypeError, ValueError):
+                    pass
         insp = cond.get("inspection") or {}
         l.has_inspection_report = bool(insp)
+
+        # Steering: prefer condition/spec field over the LHD default.
+        steer = (cond.get("steering") or spec.get("handle") or "").lower()
+        if "right" in steer or "rhd" in steer or "우" in steer:
+            l.steering = "Right"
+        elif "left" in steer or "lhd" in steer or "좌" in steer:
+            l.steering = "Left"
 
         opts = detail.get("options") or {}
         if isinstance(opts, dict):
@@ -203,7 +283,7 @@ def build_listing(card: dict, detail: dict | None = None) -> Listing:
             l.options_extra = list(opts.get("etc") or opts.get("choice") or [])
         det_photos = _photo_urls(detail.get("photos") or [])
         if det_photos:
-            l.photos = det_photos
+            l.photos = det_photos[:30]  # cap at 30 like guazi
         l.raw["detail_status"] = "ok"
     elif detail:
         l.raw["detail_status"] = detail.get("_err", "err")

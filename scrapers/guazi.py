@@ -26,10 +26,23 @@ SLUG_RE = re.compile(
 )
 
 MULTI_WORD_BRANDS = {
-    "land-rover", "mercedes-benz", "geely-auto", "alfa-romeo", "aston-martin",
-    "rolls-royce", "great-wall", "wuling-hongguang", "saic-roewe", "dongfeng-aeolus",
-    "saic-maxus", "gac-trumpchi", "faw-bestune", "chery-jetour", "beijing-auto",
+    # Western & Korean
+    "land-rover", "mercedes-benz", "alfa-romeo", "aston-martin", "rolls-royce",
     "lynk-co", "smart-brabus",
+    # Chinese conglomerates with shared parent prefix
+    "great-wall", "wuling-hongguang", "geely-auto",
+    "saic-roewe", "saic-maxus",
+    "gac-trumpchi", "gac-aion", "gac-hyptec",
+    "dongfeng-aeolus", "dongfeng-fengxing", "dongfeng-voyah", "dongfeng-m-hero",
+    "faw-bestune", "faw-hongqi",
+    "chery-jetour", "chery-exeed", "chery-omoda", "chery-jaecoo", "chery-icar",
+    "byd-denza", "byd-yangwang", "byd-fang-cheng-bao",
+    "changan-deepal", "changan-avatr",
+    "nio-onvo", "nio-firefly",
+    "huawei-aito", "huawei-luxeed", "huawei-stelato", "huawei-maextro",
+    "xiaomi-auto",
+    "beijing-auto",
+    "great-wall-haval", "great-wall-tank", "great-wall-wey", "great-wall-ora",
 }
 
 
@@ -185,8 +198,8 @@ def fetch_list(
     return out
 
 
-JSONLD_RE = re.compile(
-    r'<script\s+type="application/ld\+json">\s*(\{.*?\})\s*</script>', re.DOTALL
+JSONLD_OPEN_RE = re.compile(
+    r'<script\s+type="application/ld\+json">\s*', re.IGNORECASE
 )
 META_RE = re.compile(
     r'<meta\s+(?:name|property)="([^"]+)"\s+content="([^"]*)"', re.IGNORECASE
@@ -194,17 +207,6 @@ META_RE = re.compile(
 NEXT_CHUNK_RE = re.compile(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)')
 REPORT_LITE_KEY = '"reportDetailLite"'
 INQUIRE_PRICE = 9999999.0
-
-
-def _parse_jsonld(body: str) -> dict:
-    for m in JSONLD_RE.finditer(body):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and data.get("@type") == "Car":
-            return data
-    return {}
 
 
 def _parse_metas(body: str) -> dict[str, str]:
@@ -219,14 +221,31 @@ def _join_next_chunks(body: str) -> str:
 
 
 def _extract_object_at(text: str, start: int) -> str | None:
-    """Read a balanced JSON object starting at the first '{' after `start`."""
+    """Read a balanced JSON object starting at the first '{' after `start`.
+
+    Aware of double-quoted JSON strings and backslash escapes so braces
+    inside string values do not throw off the depth counter.
+    """
     try:
         open_at = text.index("{", start)
     except ValueError:
         return None
     depth = 0
+    in_str = False
+    escape = False
     for i in range(open_at, len(text)):
         c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+            continue
         if c == "{":
             depth += 1
         elif c == "}":
@@ -234,6 +253,23 @@ def _extract_object_at(text: str, start: int) -> str | None:
             if depth == 0:
                 return text[open_at : i + 1]
     return None
+
+
+def _parse_jsonld(body: str) -> dict:
+    """Find every <script type="application/ld+json"> block, parse it with
+    a balanced-brace extractor (handles nested objects and strings with
+    braces), and return the first @type=Car node."""
+    for m in JSONLD_OPEN_RE.finditer(body):
+        obj_str = _extract_object_at(body, m.end())
+        if not obj_str:
+            continue
+        try:
+            data = json.loads(obj_str)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("@type") == "Car":
+            return data
+    return {}
 
 
 def _parse_report_lite(joined: str) -> dict:
@@ -250,10 +286,22 @@ def _parse_report_lite(joined: str) -> dict:
 
 
 def _parse_spec_list(joined: str) -> dict:
-    """Extract the [{key,name,value}, ...] vehicle-spec array."""
-    anchor = joined.find('"key":"regDate"')
-    if anchor < 0:
-        anchor = joined.find('"key":"vin"')
+    """Extract the [{key,name,value}, ...] vehicle-spec array.
+
+    Anchor search probes several known keys — older listings may lack
+    `regDate` / `vin` but still have `engine` / `bodyType` / `horsepower`,
+    so we don't bail just because the first anchor misses.
+    """
+    SPEC_ANCHORS = (
+        '"key":"regDate"', '"key":"vin"', '"key":"engine"',
+        '"key":"horsepower"', '"key":"bodyType"', '"key":"driveType"',
+        '"key":"mileage"', '"key":"exteriorColor"',
+    )
+    anchor = -1
+    for needle in SPEC_ANCHORS:
+        anchor = joined.find(needle)
+        if anchor >= 0:
+            break
     if anchor < 0:
         return {}
     arr_start = joined.rfind("[", 0, anchor)
@@ -288,7 +336,13 @@ def enrich_detail(l: Listing) -> Listing:
     page = StealthyFetcher.fetch(
         l.url, headless=True, network_idle=True, humanize=True, wait=2000
     )
-    l.raw["detail_status"] = page.status
+    status = getattr(page, "status", None)
+    l.raw["detail_status"] = status
+    # Skip parsing on HTTP errors — the body is an error page, not the listing.
+    if status and isinstance(status, int) and status >= 400:
+        print(f"[guazi] detail HTTP {status} for {l.url} — skip enrichment",
+              file=sys.stderr)
+        return l
     body = page.body.decode("utf-8", "replace")
 
     metas = _parse_metas(body)
@@ -358,7 +412,13 @@ def enrich_detail(l: Listing) -> Listing:
             l.horsepower_ps = _to_float(str(v))
         if v := spec.get("driveType"):
             l.drive_train = str(v)
+        # body_type — try spec first, then category fallback names parsed
+        # from streamed payload.
         if v := spec.get("bodyType"):
+            l.body_type = str(v)
+        elif v := spec.get("bodyName"):
+            l.body_type = str(v)
+        elif v := spec.get("style"):
             l.body_type = str(v)
         if v := spec.get("doors"):
             try:
@@ -381,12 +441,12 @@ def enrich_detail(l: Listing) -> Listing:
         if v := spec.get("vin"):
             l.vin = str(v)
         if v := spec.get("fuel"):
-            l.fuel = str(v) or l.fuel
+            l.fuel = str(v)
         if v := spec.get("mileage"):
             try:
-                km = int(str(v).replace(",", ""))
-                if not l.mileage_km:
-                    l.mileage_km = km
+                # Spec mileage is the authoritative odometer reading; slug
+                # value is rounded for the URL. Always prefer spec.
+                l.mileage_km = int(str(v).replace(",", ""))
             except ValueError:
                 pass
 
@@ -415,9 +475,12 @@ def enrich_detail(l: Listing) -> Listing:
             for c in report["categoryList"]
         ]
 
-    # Color: prefer slug match
+    # Color: prefer slug match (canonical English colors guazi puts there).
+    # Spec's exteriorColor may be the source-language label (e.g. Chinese
+    # "白色") — slug overrides it when present.
     color_match = re.search(
-        r"-(black|white|red|blue|silver|gray|grey|green|gold|brown|yellow|orange|purple)-",
+        r"-(black|white|red|blue|silver|gray|grey|green|gold|brown|yellow|"
+        r"orange|purple|beige|champagne|bronze|copper|pink|navy|ivory|pearl)-",
         l.slug,
     )
     if color_match:
@@ -455,10 +518,17 @@ def run(
     # if grade filter is requested, we must over-fetch candidates because
     # grade is known only after detail enrichment
     overfetch_mult = 4 if grades else 1
+    target = limit * overfetch_mult
     listings = fetch_list(
-        limit=limit * overfetch_mult, path=path, params=params,
+        limit=target, path=path, params=params,
         max_mileage_km=max_mileage_km, min_year=min_year, max_year=max_year,
     )
+    if grades and len(listings) < target:
+        print(
+            f"[guazi] WARNING: fetched {len(listings)}/{target} candidates for "
+            f"grades={sorted(grades)} — result may be smaller than --limit={limit}",
+            file=sys.stderr,
+        )
     kept: list[Listing] = []
     for l in listings:
         if detail:
