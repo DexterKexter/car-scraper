@@ -11,9 +11,16 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
 
 from scrapling.fetchers import StealthyFetcher
+
+# Parallel detail-fetch worker count. Each worker is a separate Chromium
+# context (~600-800 MB RAM with disable_resources=True), so 4 fits inside
+# GitHub Actions' 7GB runner with headroom. Bumping higher risks OOM
+# kills and also raises the chance of guazi seeing a burst pattern.
+DETAIL_WORKERS = 4
 
 BASE = "https://en.guazi.com"
 LIST_PATH = "/used-cars/"
@@ -541,14 +548,29 @@ def run(
             f"grades={sorted(grades)} — result may be smaller than --limit={limit}",
             file=sys.stderr,
         )
-    kept: list[Listing] = []
-    for l in listings:
-        if detail:
+    if detail:
+        # Parallel enrich — each worker hits its own detail URL with an
+        # isolated StealthyFetcher (Chromium context). enrich_detail
+        # mutates the Listing in place; we wrap it so a single failure
+        # doesn't take down the pool.
+        def _enrich_safe(l: Listing) -> Listing:
             try:
                 enrich_detail(l)
             except Exception as e:
                 l.raw["detail_error"] = repr(e)
                 print(f"[guazi] err {l.url}: {e}", file=sys.stderr)
+            return l
+
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as ex:
+            # Consume the iterator to materialize mutations — order does
+            # not matter because we filter + cap afterwards.
+            list(ex.map(_enrich_safe, listings))
+        print(f"[guazi] enriched {len(listings)} in {time.time()-t0:.1f}s "
+              f"({DETAIL_WORKERS} workers)", file=sys.stderr)
+
+    kept: list[Listing] = []
+    for l in listings:
         if grades and (l.grade or "").upper() not in grades:
             print(f"[guazi] skip grade={l.grade!r} ({l.url})", file=sys.stderr)
             continue
