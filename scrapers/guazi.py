@@ -266,6 +266,11 @@ def fetch_list(
             )
             print(f"[guazi] list p{page_num} API: {time.time()-t0:.1f}s "
                   f"({len(resp) if resp else 0} bytes)", file=sys.stderr)
+            if resp:
+                # Debug: first 300 chars of response so we can see what guazi
+                # said when API returns 0 hrefs.
+                preview = resp.replace("\n", " ").replace("\r", " ")[:300]
+                print(f"[guazi]   response preview: {preview}", file=sys.stderr)
             hrefs = [h for h in _hrefs_from_api(resp) if h not in seen]
             if not hrefs:
                 # API returned nothing usable (captcha / shape change) —
