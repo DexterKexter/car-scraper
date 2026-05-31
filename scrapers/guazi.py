@@ -295,11 +295,32 @@ def fetch_list(
                 timeout=30000,
             )
             body = page.body.decode("utf-8", "replace")
-            hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
-            print(f"[guazi] HTML body {len(body)} bytes, {len(hrefs)} hrefs",
-                  file=sys.stderr)
-            # Debug: if classic path-match found nothing, sniff for product
-            # identifiers in Next-streamed JSON so we can build URLs directly.
+            # Strategy 1: Scrapling CSS selector against the hydrated DOM.
+            # poisk_avto's old scraper grabbed hrefs this way — anchors are
+            # attached by client JS after hydration, so raw-HTML regex misses
+            # them. Strategy 2 (fallback): the regex, in case SSR comes back.
+            dom_hrefs: list[str] = []
+            try:
+                for el in page.css('a[href*="/products/"]'):
+                    h = el.attrib.get("href") if hasattr(el, "attrib") else None
+                    if h is None and hasattr(el, "get"):
+                        h = el.get("href")
+                    if h and h.endswith(".html"):
+                        dom_hrefs.append(h if h.startswith("/") else "/" + h.lstrip("/"))
+            except Exception as e:
+                print(f"[guazi] DOM selector failed: {e}", file=sys.stderr)
+            regex_hrefs = DETAIL_HREF_RE.findall(body)
+            local_seen: set[str] = set()
+            hrefs = []
+            for h in dom_hrefs + regex_hrefs:
+                if h in seen or h in local_seen:
+                    continue
+                local_seen.add(h)
+                hrefs.append(h)
+            print(f"[guazi] body {len(body)} bytes, dom={len(dom_hrefs)} "
+                  f"regex={len(regex_hrefs)} unique={len(hrefs)}", file=sys.stderr)
+            # Debug: if both strategies fail, sniff for product identifiers
+            # in Next-streamed JSON so we can build URLs directly.
             if not hrefs:
                 ID_KEYS = ("clueId", "productSlug", "productId", "slug",
                            "seoUrl", "seo_url", "detailUrl", "productDetailUrl")
