@@ -285,14 +285,16 @@ def fetch_list(
             page = StealthyFetcher.fetch(
                 url,
                 headless=True,
-                network_idle=False,
-                humanize=False,
-                wait=500,
-                disable_resources=True,
-                timeout=20000,
+                network_idle=True,       # Phase 1 disabled this — but the
+                humanize=True,           # listings JSON is streamed in late,
+                wait=2500,               # so without network-idle we get an
+                disable_resources=True,  # empty body. Keep disable_resources.
+                timeout=30000,
             )
             body = page.body.decode("utf-8", "replace")
             hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
+            print(f"[guazi] HTML body {len(body)} bytes, {len(hrefs)} hrefs",
+                  file=sys.stderr)
         if not hrefs:
             print(f"[guazi] no new hrefs on p{page_num}, stop", file=sys.stderr)
             break
@@ -457,11 +459,11 @@ def enrich_detail(l: Listing) -> Listing:
     page = StealthyFetcher.fetch(
         l.url,
         headless=True,
-        network_idle=False,
-        humanize=False,
-        wait=500,
+        network_idle=True,
+        humanize=True,
+        wait=2000,
         disable_resources=True,
-        timeout=20000,
+        timeout=30000,
     )
     status = getattr(page, "status", None)
     l.raw["detail_status"] = status
