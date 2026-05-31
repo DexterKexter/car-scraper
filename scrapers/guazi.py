@@ -319,9 +319,12 @@ def fetch_list(
                 hrefs.append(h)
             print(f"[guazi] body {len(body)} bytes, dom={len(dom_hrefs)} "
                   f"regex={len(regex_hrefs)} unique={len(hrefs)}", file=sys.stderr)
-            # Debug: if both strategies fail, sniff for product identifiers
-            # in Next-streamed JSON so we can build URLs directly.
             if not hrefs:
+                head = body[:600].replace("\n", " ").replace("\r", " ")
+                print(f"[guazi] DEBUG body head: {head}", file=sys.stderr)
+                if "captcha" in body.lower() or "verification" in body.lower():
+                    print(f"[guazi] DEBUG body contains 'captcha'/'verification' — blocked",
+                          file=sys.stderr)
                 ID_KEYS = ("clueId", "productSlug", "productId", "slug",
                            "seoUrl", "seo_url", "detailUrl", "productDetailUrl")
                 for key in ID_KEYS:
