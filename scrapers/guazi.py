@@ -168,7 +168,13 @@ def fetch_list(
         url = _build_list_url(path, page_num, params)
         print(f"[guazi] list p{page_num}: {url}", file=sys.stderr)
         page = StealthyFetcher.fetch(
-            url, headless=True, network_idle=True, humanize=True, wait=2500
+            url,
+            headless=True,
+            network_idle=False,      # rely on DOM load, not full silence
+            humanize=False,          # en.guazi has no aggressive bot-detection
+            wait=500,                # short safety pad after load
+            disable_resources=True,  # skip CSS/img/font — only HTML matters
+            timeout=20000,
         )
         body = page.body.decode("utf-8", "replace")
         hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
@@ -334,7 +340,13 @@ def _parse_spec_list(joined: str) -> dict:
 def enrich_detail(l: Listing) -> Listing:
     print(f"[guazi] detail: {l.url}", file=sys.stderr)
     page = StealthyFetcher.fetch(
-        l.url, headless=True, network_idle=True, humanize=True, wait=2000
+        l.url,
+        headless=True,
+        network_idle=False,
+        humanize=False,
+        wait=500,
+        disable_resources=True,
+        timeout=20000,
     )
     status = getattr(page, "status", None)
     l.raw["detail_status"] = status
@@ -534,7 +546,6 @@ def run(
         if detail:
             try:
                 enrich_detail(l)
-                time.sleep(0.6)
             except Exception as e:
                 l.raw["detail_error"] = repr(e)
                 print(f"[guazi] err {l.url}: {e}", file=sys.stderr)
