@@ -106,17 +106,29 @@ class OxylabsWSA:
     ) -> str | None:
         """POST a JSON body to `url` via WSA. Returns the response body string
         (typically the JSON the target API returned). Use for endpoints behind
-        bot-walls (Tencent EdgeOne, Cloudflare etc.) where direct httpx 403s."""
+        bot-walls (Tencent EdgeOne, Cloudflare etc.) where direct httpx 403s.
+
+        Oxylabs API uses `request.body` for the POST payload — `http_method`
+        is ignored on the public universal source. We pass body as a dict (the
+        API serializes it server-side) and an explicit Content-Type header so
+        the upstream sees `application/json`.
+        """
         import json as _json
         body: dict[str, Any] = {
             "source": "universal",
             "url": url,
             "user_agent_type": user_agent_type,
-            "http_method": "post",
-            "payload": _json.dumps(json_body),
+            # Oxylabs convention for non-GET targets — `request.body` triggers
+            # POST + serializes the dict. Some accounts also need the legacy
+            # `body` at top level, so we send both.
+            "request": {"method": "POST", "body": json_body},
+            "body": _json.dumps(json_body),
         }
+        merged_headers = {"content-type": "application/json"}
         if headers:
-            body["headers"] = [{"key": k, "value": v} for k, v in headers.items()]
+            merged_headers.update(headers)
+        body["headers"] = [{"key": k, "value": v}
+                            for k, v in merged_headers.items()]
         g = geo or self.geo
         if g:
             body["geo_location"] = g
