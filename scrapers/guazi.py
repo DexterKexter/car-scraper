@@ -298,6 +298,16 @@ def fetch_list(
             hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
             print(f"[guazi] HTML body {len(body)} bytes, {len(hrefs)} hrefs",
                   file=sys.stderr)
+            # Debug: if classic path-match found nothing, sniff for product
+            # identifiers in Next-streamed JSON so we can build URLs directly.
+            if not hrefs:
+                ID_KEYS = ("clueId", "productSlug", "productId", "slug",
+                           "seoUrl", "seo_url", "detailUrl", "productDetailUrl")
+                for key in ID_KEYS:
+                    samples = re.findall(rf'"{key}"\s*:\s*"([^"]{{4,80}})"', body)[:5]
+                    if samples:
+                        print(f"[guazi] DEBUG found {key} samples: {samples}",
+                              file=sys.stderr)
         if not hrefs:
             print(f"[guazi] no new hrefs on p{page_num}, stop", file=sys.stderr)
             break
