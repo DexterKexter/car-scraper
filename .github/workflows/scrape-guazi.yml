@@ -128,7 +128,7 @@ jobs:
       # batches keep coming as fast as the API can keep up. Cron heartbeat
       # restarts the chain if a run ever fails (and breaks the chain).
       - name: Trigger next batch
-        if: success() && github.event_name != 'workflow_dispatch'
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

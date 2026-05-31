@@ -149,7 +149,7 @@ jobs:
           path: out/encar.json
 
       - name: Trigger next batch
-        if: success() && github.event_name != 'workflow_dispatch'
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
