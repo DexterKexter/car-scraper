@@ -28,14 +28,24 @@ on:
         description: "Skip DB upsert (true = JSON artifact only)"
         default: "false"
   schedule:
-    # Daily at 06:00 UTC (11:00 Almaty). Conservative cadence — adjust if the
-    # OpenRouter / Oxylabs budget allows more.
-    - cron: "*/15 * * * *"
+    # Heartbeat: cron re-fires every 30 min as a safety net in case the
+    # self-chain step (see end of job) breaks. Self-chain handles the
+    # bulk of the cadence.
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  actions: write   # required for the self-redispatch step
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    # Cancel an in-flight run when a new one starts — prevents stacked
+    # runs from the cron heartbeat overlapping with the self-chain.
+    concurrency:
+      group: scrape-guazi
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -113,3 +123,14 @@ jobs:
         with:
           name: guazi-listings
           path: out/guazi.json
+
+      # Self-chain: dispatch the next run on success. Daemon-style loop —
+      # batches keep coming as fast as the API can keep up. Cron heartbeat
+      # restarts the chain if a run ever fails (and breaks the chain).
+      - name: Trigger next batch
+        if: success() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 15
+          gh workflow run scrape-guazi.yml --ref ${{ github.ref_name }} -f limit=10

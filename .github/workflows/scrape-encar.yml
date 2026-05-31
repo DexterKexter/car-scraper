@@ -49,13 +49,20 @@ on:
         description: "Skip DB upsert (true = JSON artifact only)"
         default: "false"
   schedule:
-    # Daily at 18:00 UTC (23:00 Almaty / 03:00 Seoul). Stagger vs guazi.
-    - cron: "5/15 * * * *"
+    # Heartbeat — see scrape-guazi.yml for the chained-batch pattern.
+    - cron: "15/30 * * * *"
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    concurrency:
+      group: scrape-encar
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -140,3 +147,11 @@ jobs:
         with:
           name: encar-listings
           path: out/encar.json
+
+      - name: Trigger next batch
+        if: success() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 15
+          gh workflow run scrape-encar.yml --ref ${{ github.ref_name }} -f limit=10
