@@ -30,7 +30,7 @@ on:
   schedule:
     # Daily at 06:00 UTC (11:00 Almaty). Conservative cadence — adjust if the
     # OpenRouter / Oxylabs budget allows more.
-    - cron: "0 6 * * *"
+    - cron: "*/15 * * * *"
 
 jobs:
   scrape:

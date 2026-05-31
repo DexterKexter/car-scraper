@@ -50,7 +50,7 @@ on:
         default: "false"
   schedule:
     # Daily at 18:00 UTC (23:00 Almaty / 03:00 Seoul). Stagger vs guazi.
-    - cron: "0 18 * * *"
+    - cron: "5/15 * * * *"
 
 jobs:
   scrape:
