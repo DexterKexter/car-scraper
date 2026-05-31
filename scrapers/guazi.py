@@ -16,6 +16,14 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling.fetchers import StealthyFetcher
 
+from core.oxylabs import OxylabsWSA
+
+# Oxylabs Web Scraper API endpoint for guazi's filter/list JSON. When the
+# Oxylabs creds are present in env, we POST list queries through WSA to
+# bypass Tencent EdgeOne's CAPTCHA wall — that gets us instant JSON in
+# ~1-2s vs ~9s through StealthyFetcher's Chromium boot.
+GUAZI_LIST_API = "https://en.guazi.com/os/facade/search/product/list?language=en"
+
 # Parallel detail-fetch worker count. Each worker is a separate Chromium
 # context (~600-800 MB RAM with disable_resources=True), so 4 fits inside
 # GitHub Actions' 7GB runner with headroom. Bumping higher risks OOM
@@ -158,6 +166,71 @@ def _build_list_url(
     return base + (("?" + urlencode(q, safe=",")) if q else "")
 
 
+def _params_to_api_body(params: dict[str, str] | None, page_num: int,
+                         page_size: int = 30) -> dict:
+    """Convert UI-style query params (price=8000,15000) to guazi's list-API
+    JSON shape. Best-effort — keys we don't recognize get dropped."""
+    body: dict = {
+        "language": "en",
+        "pageSize": page_size,
+        "pageNum": page_num,
+        "clientScene": "cars",
+        "sourceFrom": "wap",
+        "businessType": 5,
+        "countryCode": "",
+        # did/guid required by API. Random UUIDs accepted — no session binding.
+        "guid": "11111111-2222-3333-4444-555555555555",
+        "did": "DID177957158162000007",
+    }
+    for k, v in (params or {}).items():
+        if k == "price" and "," in v:
+            lo, hi = v.split(",", 1)
+            if lo: body["priceStart"] = int(lo)
+            if hi: body["priceEnd"] = int(hi)
+        elif k == "licenseYear" and "," in v:
+            lo, hi = v.split(",", 1)
+            if lo: body["licenseYearStart"] = int(lo)
+            if hi: body["licenseYearEnd"] = int(hi)
+        elif k == "roadHaul" and "," in v:
+            lo, hi = v.split(",", 1)
+            if lo: body["roadHaulStart"] = int(lo)
+            if hi: body["roadHaulEnd"] = int(hi)
+        elif k == "detectionLevels":
+            body["detectionLevels"] = v.split(",")
+        elif k == "vehicleSourceClassificationCustomers":
+            body["vehicleSourceClassificationCustomers"] = v.split(",")
+    return body
+
+
+def _hrefs_from_api(json_body: str | None) -> list[str]:
+    """Extract /products/<slug>.html paths from guazi list-API JSON.
+    Returns empty list if input isn't valid JSON with the expected shape."""
+    if not json_body:
+        return []
+    try:
+        data = json.loads(json_body)
+    except json.JSONDecodeError:
+        return []
+    rows = ((data.get("data") or {}).get("list") or
+            (data.get("data") or {}).get("records") or
+            data.get("list") or [])
+    out: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # Try several known shapes for slug / url field.
+        slug = row.get("slug") or row.get("productSlug") or row.get("seoSlug")
+        url = row.get("url") or row.get("productUrl")
+        clue = row.get("clueId") or row.get("clueid") or row.get("productId")
+        if slug:
+            out.append(f"/products/{slug}.html")
+        elif url and "/products/" in url:
+            out.append(url[url.index("/products/"):])
+        elif clue:
+            out.append(f"/products/{clue}.html")
+    return out
+
+
 def fetch_list(
     limit: int = 10,
     path: str = LIST_PATH,
@@ -171,20 +244,50 @@ def fetch_list(
     seen: set[str] = set()
     skipped = 0
     page_num = 1
+    wsa = OxylabsWSA()
+    use_api = wsa.enabled
+    if use_api:
+        print(f"[guazi] list source: Oxylabs WSA -> JSON API (geo={wsa.geo!r})",
+              file=sys.stderr)
+    else:
+        print(f"[guazi] list source: StealthyFetcher (no Oxylabs creds)",
+              file=sys.stderr)
     while len(out) < limit and page_num <= max_pages:
-        url = _build_list_url(path, page_num, params)
-        print(f"[guazi] list p{page_num}: {url}", file=sys.stderr)
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            network_idle=False,      # rely on DOM load, not full silence
-            humanize=False,          # en.guazi has no aggressive bot-detection
-            wait=500,                # short safety pad after load
-            disable_resources=True,  # skip CSS/img/font — only HTML matters
-            timeout=20000,
-        )
-        body = page.body.decode("utf-8", "replace")
-        hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
+        hrefs: list[str] = []
+        if use_api:
+            api_body = _params_to_api_body(params, page_num, page_size=max(20, limit))
+            t0 = time.time()
+            resp = wsa.post_json(
+                GUAZI_LIST_API,
+                api_body,
+                headers={"content-type": "application/json",
+                         "origin": "https://en.guazi.com",
+                         "referer": "https://en.guazi.com/used-cars/"},
+            )
+            print(f"[guazi] list p{page_num} API: {time.time()-t0:.1f}s "
+                  f"({len(resp) if resp else 0} bytes)", file=sys.stderr)
+            hrefs = [h for h in _hrefs_from_api(resp) if h not in seen]
+            if not hrefs:
+                # API returned nothing usable (captcha / shape change) —
+                # fall back to HTML scrape for this page.
+                print(f"[guazi] API gave 0 hrefs on p{page_num}, falling back to Stealthy",
+                      file=sys.stderr)
+                use_api = False
+
+        if not hrefs:
+            url = _build_list_url(path, page_num, params)
+            print(f"[guazi] list p{page_num}: {url}", file=sys.stderr)
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=False,
+                humanize=False,
+                wait=500,
+                disable_resources=True,
+                timeout=20000,
+            )
+            body = page.body.decode("utf-8", "replace")
+            hrefs = [h for h in DETAIL_HREF_RE.findall(body) if h not in seen]
         if not hrefs:
             print(f"[guazi] no new hrefs on p{page_num}, stop", file=sys.stderr)
             break

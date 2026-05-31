@@ -78,6 +78,9 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OXYLABS_USERNAME: ${{ secrets.OXYLABS_USERNAME }}
+          OXYLABS_PASSWORD: ${{ secrets.OXYLABS_PASSWORD }}
+          OXYLABS_GEO: ${{ vars.OXYLABS_COUNTRY || 'China' }}
         run: |
           # Build args. Cron runs use defaults; workflow_dispatch passes inputs.
           PATH_ARG="${{ github.event.inputs.path || '/used-cars/' }}"

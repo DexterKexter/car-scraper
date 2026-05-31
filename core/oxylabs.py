@@ -45,6 +45,35 @@ class OxylabsWSA:
     def __exit__(self, *a):
         self.close()
 
+    def _query(self, body: dict, retries: int = 2) -> str | None:
+        """Submit a WSA job, return results[0].content or None."""
+        if not self.enabled or not self._client:
+            return None
+        for i in range(retries + 1):
+            try:
+                r = self._client.post(WSA_URL, json=body)
+                if r.status_code == 200:
+                    data = r.json()
+                    results = data.get("results") or []
+                    if results:
+                        return results[0].get("content")
+                    print(f"[oxylabs] empty results for {body.get('url')}",
+                          file=sys.stderr)
+                    return None
+                if r.status_code in (429, 503):
+                    wait = 2 ** i
+                    print(f"[oxylabs] {r.status_code} backoff {wait}s",
+                          file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                print(f"[oxylabs] {body.get('url')} -> {r.status_code} "
+                      f"{r.text[:200]}", file=sys.stderr)
+                return None
+            except Exception as e:
+                print(f"[oxylabs] attempt {i+1}: {e}", file=sys.stderr)
+                time.sleep(1.5 * (i + 1))
+        return None
+
     def get(
         self,
         url: str,
@@ -54,8 +83,6 @@ class OxylabsWSA:
         user_agent_type: str = "desktop",
         retries: int = 2,
     ) -> str | None:
-        if not self.enabled or not self._client:
-            return None
         body: dict[str, Any] = {
             "source": source,
             "url": url,
@@ -66,25 +93,31 @@ class OxylabsWSA:
         g = geo or self.geo
         if g:
             body["geo_location"] = g
-        for i in range(retries + 1):
-            try:
-                r = self._client.post(WSA_URL, json=body)
-                if r.status_code == 200:
-                    data = r.json()
-                    results = data.get("results") or []
-                    if results:
-                        return results[0].get("content")
-                    print(f"[oxylabs] empty results for {url}", file=sys.stderr)
-                    return None
-                if r.status_code in (429, 503):
-                    wait = 2 ** i
-                    print(f"[oxylabs] {r.status_code} backoff {wait}s", file=sys.stderr)
-                    time.sleep(wait)
-                    continue
-                print(f"[oxylabs] {url} -> {r.status_code} {r.text[:200]}",
-                      file=sys.stderr)
-                return None
-            except Exception as e:
-                print(f"[oxylabs] {url} attempt {i+1}: {e}", file=sys.stderr)
-                time.sleep(1.5 * (i + 1))
-        return None
+        return self._query(body, retries=retries)
+
+    def post_json(
+        self,
+        url: str,
+        json_body: dict,
+        headers: dict | None = None,
+        geo: str | None = None,
+        user_agent_type: str = "desktop",
+        retries: int = 2,
+    ) -> str | None:
+        """POST a JSON body to `url` via WSA. Returns the response body string
+        (typically the JSON the target API returned). Use for endpoints behind
+        bot-walls (Tencent EdgeOne, Cloudflare etc.) where direct httpx 403s."""
+        import json as _json
+        body: dict[str, Any] = {
+            "source": "universal",
+            "url": url,
+            "user_agent_type": user_agent_type,
+            "http_method": "post",
+            "payload": _json.dumps(json_body),
+        }
+        if headers:
+            body["headers"] = [{"key": k, "value": v} for k, v in headers.items()]
+        g = geo or self.geo
+        if g:
+            body["geo_location"] = g
+        return self._query(body, retries=retries)
