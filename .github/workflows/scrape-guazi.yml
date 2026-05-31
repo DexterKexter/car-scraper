@@ -11,7 +11,7 @@ on:
         default: ""
       limit:
         description: "Number of listings"
-        default: "30"
+        default: "10"
       detail:
         description: "Enrich detail pages (true/false)"
         default: "true"
@@ -71,7 +71,7 @@ jobs:
         run: |
           # Build args. Cron runs use defaults; workflow_dispatch passes inputs.
           PATH_ARG="${{ github.event.inputs.path || '/used-cars/' }}"
-          LIMIT="${{ github.event.inputs.limit || '30' }}"
+          LIMIT="${{ github.event.inputs.limit || '10' }}"
           FILTERS="${{ github.event.inputs.filters }}"
           DETAIL="${{ github.event.inputs.detail || 'true' }}"
           GRADES="${{ github.event.inputs.grades }}"

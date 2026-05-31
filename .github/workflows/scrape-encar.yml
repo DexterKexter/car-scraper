@@ -5,7 +5,7 @@ on:
     inputs:
       limit:
         description: "Number of listings"
-        default: "20"
+        default: "10"
       offset:
         description: "Pagination offset"
         default: "0"
@@ -84,7 +84,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          LIMIT="${{ github.event.inputs.limit || '20' }}"
+          LIMIT="${{ github.event.inputs.limit || '10' }}"
           OFFSET="${{ github.event.inputs.offset || '0' }}"
           QUERY="${{ github.event.inputs.query }}"
           DETAIL="${{ github.event.inputs.detail || 'true' }}"
