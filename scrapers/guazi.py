@@ -32,7 +32,10 @@ DETAIL_WORKERS = 4
 
 BASE = "https://en.guazi.com"
 LIST_PATH = "/used-cars/"
-DETAIL_HREF_RE = re.compile(r'href="(/products/[^"?]+?\.html)')
+# Detail-link extraction. Guazi has flipped between SSR <a href="..."> and
+# Next.js-streamed JSON paths over time, so we match the `/products/<slug>.html`
+# path anywhere in the body (HTML attribute, JSON string, JS literal).
+DETAIL_HREF_RE = re.compile(r'/products/[a-z0-9\-]+\.html')
 SLUG_RE = re.compile(
     r"^(?P<brand>[a-z\-]+?)-(?P<model>[a-z0-9\-]+?)-(?P<year>(?:19|20)\d{2})-"
     r"(?P<engine>[\d.]+l)-(?:[a-z]+-)?(?P<mileage>\d+)km-"
