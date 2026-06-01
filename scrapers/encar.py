@@ -316,7 +316,10 @@ def build_query(
     only_inspection: bool = False,
 ) -> str:
     """Compose encar `q=` expression (dot-tree syntax)."""
-    clauses = ["Hidden.N.", "CarType.Y."]
+    # CarType.A = all listings (국산 domestic + 수입 imported). Was CarType.Y
+    # (Korean domestic only, ~155k cars) which silently excluded the ~65k
+    # imported listings (BMW, Benz, Audi, Toyota, …).
+    clauses = ["Hidden.N.", "CarType.A."]
 
     if min_year is not None or max_year is not None:
         lo = f"{min_year}01" if min_year else ""
