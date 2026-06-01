@@ -6,6 +6,7 @@ Geo-redirect: www.guazi.com/<city>/buy/ -> en.guazi.com for non-CN IPs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -17,6 +18,14 @@ from urllib.parse import urljoin, urlparse
 from scrapling.fetchers import StealthyFetcher
 
 from core.oxylabs import OxylabsWSA
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# Session cookies harvested via Playwright login; reused on every Stealthy
+# fetch in the run via the `cookies=` param. Empty dict = no auth.
+SESSION_COOKIES: dict[str, str] = {}
+COOKIE_CACHE = Path(".cache/guazi-cookies.json")
 
 # Oxylabs Web Scraper API endpoint for guazi's filter/list JSON. When the
 # Oxylabs creds are present in env, we POST list queries through WSA to
@@ -156,6 +165,115 @@ def parse_slug(slug: str) -> dict:
     }
 
 
+def _load_cached_cookies() -> dict[str, str]:
+    """Reuse cookies from a previous run if the cache file exists and isn't
+    older than 18 hours (guazi's session cookies usually live ~24h)."""
+    if not COOKIE_CACHE.exists():
+        return {}
+    try:
+        age_s = time.time() - COOKIE_CACHE.stat().st_mtime
+        if age_s > 18 * 3600:
+            return {}
+        return json.loads(COOKIE_CACHE.read_text()) or {}
+    except Exception:
+        return {}
+
+
+def _save_cookies(cookies: dict[str, str]) -> None:
+    try:
+        COOKIE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        COOKIE_CACHE.write_text(json.dumps(cookies))
+    except Exception as e:
+        print(f"[guazi] cookie save failed: {e}", file=sys.stderr)
+
+
+def _login_and_capture_cookies(email: str, password: str) -> dict[str, str]:
+    """Spin up Playwright once, run the login flow from poisk_avto, and
+    return all cookies the browser captured. Empty dict on failure — the
+    caller falls back to unauthenticated fetch, which guazi may CAPTCHA."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        print(f"[guazi] playwright not installed: {e}", file=sys.stderr)
+        return {}
+
+    cookies: dict[str, str] = {}
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=UA, locale="en-US")
+            page = context.new_page()
+            print(f"[guazi] login: opening {BASE}", file=sys.stderr)
+            page.goto(BASE, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(2500)
+
+            login_btn = page.query_selector(
+                'button:has-text("Log"), a:has-text("Log"), '
+                'button:has-text("Sign"), a:has-text("Sign")'
+            )
+            if not login_btn:
+                print("[guazi] login: no Log/Sign button found", file=sys.stderr)
+            else:
+                login_btn.click()
+                page.wait_for_timeout(2000)
+                email_input = page.query_selector(
+                    'input[type="email"], input[name="email"], '
+                    'input[placeholder*="email" i], input[placeholder*="Email"]'
+                )
+                pass_input = page.query_selector(
+                    'input[type="password"], input[name="password"]'
+                )
+                if email_input and pass_input:
+                    email_input.fill(email)
+                    pass_input.fill(password)
+                    page.wait_for_timeout(500)
+                    submit = page.query_selector(
+                        'button[type="submit"], button:has-text("Log in"), '
+                        'button:has-text("Sign in")'
+                    )
+                    if submit:
+                        submit.click()
+                    else:
+                        pass_input.press("Enter")
+                    page.wait_for_timeout(3500)
+                    if "login" not in page.url.lower():
+                        print("[guazi] login: success", file=sys.stderr)
+                    else:
+                        print("[guazi] login: still on /login — likely failed",
+                              file=sys.stderr)
+                else:
+                    print("[guazi] login: form not found", file=sys.stderr)
+
+            for c in context.cookies() or []:
+                cookies[c["name"]] = c["value"]
+            print(f"[guazi] captured {len(cookies)} cookies", file=sys.stderr)
+            browser.close()
+    except Exception as e:
+        print(f"[guazi] login error: {e}", file=sys.stderr)
+    return cookies
+
+
+def _ensure_session() -> None:
+    """Populate SESSION_COOKIES from cache, or run the login flow once."""
+    global SESSION_COOKIES
+    if SESSION_COOKIES:
+        return
+    cached = _load_cached_cookies()
+    if cached:
+        SESSION_COOKIES = cached
+        print(f"[guazi] reused {len(cached)} cached cookies", file=sys.stderr)
+        return
+    email = os.getenv("GUAZI_EMAIL", "").strip()
+    password = os.getenv("GUAZI_PASSWORD", "").strip()
+    if email and password:
+        SESSION_COOKIES = _login_and_capture_cookies(email, password)
+        if SESSION_COOKIES:
+            _save_cookies(SESSION_COOKIES)
+    else:
+        print("[guazi] no GUAZI_EMAIL/PASSWORD env, running anon (CAPTCHA risk)",
+              file=sys.stderr)
+
+
 def _build_list_url(
     path: str = LIST_PATH,
     page_num: int = 1,
@@ -247,6 +365,7 @@ def fetch_list(
     seen: set[str] = set()
     skipped = 0
     page_num = 1
+    _ensure_session()
     wsa = OxylabsWSA()
     use_api = wsa.enabled
     if use_api:
@@ -288,11 +407,12 @@ def fetch_list(
             page = StealthyFetcher.fetch(
                 url,
                 headless=True,
-                network_idle=True,       # Phase 1 disabled this — but the
-                humanize=True,           # listings JSON is streamed in late,
-                wait=2500,               # so without network-idle we get an
-                disable_resources=True,  # empty body. Keep disable_resources.
+                network_idle=True,
+                humanize=True,
+                wait=2500,
+                disable_resources=True,
                 timeout=30000,
+                cookies=SESSION_COOKIES or None,
             )
             body = page.body.decode("utf-8", "replace")
             # Strategy 1: Scrapling CSS selector against the hydrated DOM.
@@ -501,6 +621,7 @@ def enrich_detail(l: Listing) -> Listing:
         wait=2000,
         disable_resources=True,
         timeout=30000,
+        cookies=SESSION_COOKIES or None,
     )
     status = getattr(page, "status", None)
     l.raw["detail_status"] = status

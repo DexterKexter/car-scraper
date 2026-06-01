@@ -72,12 +72,25 @@ jobs:
           restore-keys: |
             normalizer-cache-
 
+      # Persist the logged-in guazi cookies between runs so we don't burn
+      # a fresh Playwright login per batch. Cookies live ~24h on guazi; the
+      # scraper invalidates the file via mtime when it gets too old.
+      - name: Restore guazi cookies
+        uses: actions/cache@v4
+        with:
+          path: .cache/guazi-cookies.json
+          key: guazi-cookies-${{ github.run_id }}
+          restore-keys: |
+            guazi-cookies-
+
       - name: Pipeline (scrape -> normalize -> upsert)
         env:
           PYTHONUNBUFFERED: "1"
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GUAZI_EMAIL: ${{ secrets.GUAZI_EMAIL }}
+          GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
           OXYLABS_USERNAME: ${{ secrets.OXYLABS_USERNAME }}
           OXYLABS_PASSWORD: ${{ secrets.OXYLABS_PASSWORD }}
           OXYLABS_GEO: ${{ vars.OXYLABS_COUNTRY || 'China' }}
