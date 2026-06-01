@@ -94,6 +94,16 @@ jobs:
           restore-keys: |
             guazi-page-
 
+      # Brand list cache (7-day TTL inside guazi.py). Refreshed automatically
+      # via runtime _discover_brands() when the cache expires or is empty.
+      - name: Restore guazi brand list
+        uses: actions/cache@v4
+        with:
+          path: .cache/guazi-brands.json
+          key: guazi-brands-${{ github.run_id }}
+          restore-keys: |
+            guazi-brands-
+
       - name: Pipeline (scrape -> normalize -> upsert)
         env:
           PYTHONUNBUFFERED: "1"

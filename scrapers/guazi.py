@@ -43,11 +43,24 @@ def _cookies_for_stealthy() -> list[dict] | None:
 PAGE_CURSOR = Path(".cache/guazi-page.txt")
 PAGE_MAX_PER_BRAND = 50  # safety cap per brand — most have <30 real pages
 
-# Brand slugs to iterate. Order matters only for resume semantics — the
-# cursor stores an index into this list. Sourced from poisk_avto's working
-# scraper (collect_guazi_en.py); per-brand URLs like /used-cars/lexus/page1/
-# bypass the Tencent EdgeOne CAPTCHA wall that blocks the /used-cars/ root.
-BRAND_SLUGS: list[str] = [
+# Brand slug list — discovered at runtime from any working brand page's
+# nav, cached, and reused across self-chained runs. Hardcoded list is the
+# fallback when discovery returns too few entries (parse fail / nav change).
+BRAND_LIST_CACHE = Path(".cache/guazi-brands.json")
+BRAND_LIST_TTL_S = 7 * 24 * 3600
+BRAND_LIST_MIN = 30  # below this we keep the fallback list
+BRAND_DISCOVERY_SEED = "/used-cars/toyota/page1/"  # known-good page for nav
+
+# Non-brand slugs to exclude when sniffing /used-cars/<slug>/ anchors.
+NON_BRAND_SLUGS = {
+    "sedan", "suv", "mini-van", "hatchback", "wagon", "pick-up",
+    "van", "truck", "buy", "sell", "search", "tag", "city",
+    "convertible", "coupe", "mpv", "minivan",
+}
+
+# Fallback brand list — used when runtime discovery fails or yields too few
+# entries. Sourced from poisk_avto's working scraper.
+BRAND_SLUGS_FALLBACK: list[str] = [
     "toyota", "volkswagen", "bmw", "mercedes-benz", "audi", "honda",
     "nissan", "hyundai", "kia", "byd", "geely-auto", "chery",
     "haval", "great-wall", "changan", "buick", "chevrolet", "ford",
@@ -63,6 +76,10 @@ BRAND_SLUGS: list[str] = [
     "genesis", "acura", "alfa-romeo", "aston-martin", "mclaren",
     "lotus", "suzuki", "ds",
 ]
+
+# Populated at first call to get_brand_slugs(); rest of the module references
+# this via the getter so the discovery side-effect happens once per run.
+BRAND_SLUGS: list[str] = BRAND_SLUGS_FALLBACK
 
 # Parallel detail-fetch worker count. Each worker is a separate Chromium
 # context (~600-800 MB RAM with disable_resources=True), so 4 fits inside
@@ -334,6 +351,102 @@ def _ensure_session() -> None:
               file=sys.stderr)
 
 
+BRAND_HREF_RE = re.compile(r'href="(/used-cars/([a-z][a-z0-9-]{1,40})/?)"')
+
+
+def _load_cached_brands() -> list[str]:
+    if not BRAND_LIST_CACHE.exists():
+        return []
+    try:
+        age = time.time() - BRAND_LIST_CACHE.stat().st_mtime
+        if age > BRAND_LIST_TTL_S:
+            return []
+        data = json.loads(BRAND_LIST_CACHE.read_text())
+        return [s for s in data if isinstance(s, str)]
+    except Exception:
+        return []
+
+
+def _save_brands(slugs: list[str]) -> None:
+    try:
+        BRAND_LIST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        BRAND_LIST_CACHE.write_text(json.dumps(slugs))
+    except Exception as e:
+        print(f"[guazi] brand cache save failed: {e}", file=sys.stderr)
+
+
+def _discover_brands() -> list[str]:
+    """Fetch a known-good brand page (toyota), extract every /used-cars/<slug>/
+    anchor in its nav, filter out body-type / non-brand slugs. Returns sorted
+    unique slug list. Empty list on failure — caller falls back."""
+    url = urljoin(BASE, BRAND_DISCOVERY_SEED)
+    print(f"[guazi] brand discovery: {url}", file=sys.stderr)
+    try:
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=True,
+            humanize=True,
+            wait=2500,
+            disable_resources=True,
+            timeout=30000,
+            cookies=_cookies_for_stealthy(),
+        )
+        body = page.body.decode("utf-8", "replace")
+    except Exception as e:
+        print(f"[guazi] discovery fetch failed: {e}", file=sys.stderr)
+        return []
+
+    # Strategy 1: hydrated DOM. Strategy 2: regex against raw body.
+    found: set[str] = set()
+    try:
+        for el in page.css('a[href*="/used-cars/"]'):
+            h = el.attrib.get("href") if hasattr(el, "attrib") else None
+            if h is None and hasattr(el, "get"):
+                h = el.get("href")
+            if not h:
+                continue
+            m = re.match(r"/used-cars/([a-z][a-z0-9-]{1,40})/?$", h)
+            if m:
+                found.add(m.group(1))
+    except Exception as e:
+        print(f"[guazi] discovery DOM selector failed: {e}", file=sys.stderr)
+
+    for _, slug in BRAND_HREF_RE.findall(body):
+        found.add(slug)
+
+    brands = sorted(s for s in found if s not in NON_BRAND_SLUGS)
+    print(f"[guazi] discovered {len(brands)} brand candidates "
+          f"(raw {len(found)})", file=sys.stderr)
+    return brands
+
+
+def get_brand_slugs() -> list[str]:
+    """Lazy populate the BRAND_SLUGS module global with cache → discovery
+    → fallback resolution. Called once at the top of fetch_list()."""
+    global BRAND_SLUGS
+    cached = _load_cached_brands()
+    if len(cached) >= BRAND_LIST_MIN:
+        BRAND_SLUGS = cached
+        print(f"[guazi] using {len(cached)} cached brand slugs", file=sys.stderr)
+        return BRAND_SLUGS
+    discovered = _discover_brands()
+    if len(discovered) >= BRAND_LIST_MIN:
+        BRAND_SLUGS = discovered
+        _save_brands(discovered)
+        print(f"[guazi] using {len(discovered)} discovered brand slugs",
+              file=sys.stderr)
+        return BRAND_SLUGS
+    # Cache anything we got, even small, so we don't re-discover next run
+    # if the page is consistently sparse; but use fallback for the sweep.
+    if discovered:
+        _save_brands(discovered)
+    BRAND_SLUGS = BRAND_SLUGS_FALLBACK
+    print(f"[guazi] discovery yielded {len(discovered)} (<{BRAND_LIST_MIN}), "
+          f"using {len(BRAND_SLUGS)} fallback brand slugs", file=sys.stderr)
+    return BRAND_SLUGS
+
+
 def _build_list_url(
     path: str = LIST_PATH,
     page_num: int = 1,
@@ -425,6 +538,9 @@ def fetch_list(
     seen: set[str] = set()
     skipped = 0
     _ensure_session()
+    # Resolve brand list (cache → discovery → fallback). Populates the
+    # module-global BRAND_SLUGS used by _read_page_cursor's bounds-check.
+    get_brand_slugs()
 
     # Per-brand iteration mode only kicks in when path is the default
     # /used-cars/ root. Anything else (e.g. --path /used-cars/sedan/) walks
