@@ -1,0 +1,53 @@
+name: mirror-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max cars to mirror (empty = all eligible)"
+        required: false
+      source:
+        description: "Restrict to one source (empty = all candidate sources)"
+        required: false
+        default: "guazi"
+  schedule:
+    # Daily, after the guazi/encar scrapes have settled. Re-runs are
+    # idempotent: already-mirrored URLs live on our own Supabase host and
+    # are skipped, so this only picks up photos added since the last run.
+    - cron: "30 23 * * *"
+
+# Never let two mirror runs stack (cron + a manual dispatch overlapping).
+concurrency:
+  group: mirror-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Mirror blocked images -> Supabase Storage
+        env:
+          PYTHONUNBUFFERED: "1"
+          # service_role key — bucket policy is public-read / service-write,
+          # so the anon key used by the scrapers gets a 403 on upload.
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          ARGS=""
+          [ -n "${{ github.event.inputs.limit }}" ] && ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          SRC="${{ github.event.inputs.source || 'guazi' }}"
+          [ -n "$SRC" ] && ARGS="$ARGS --source $SRC"
+          echo "RUNNING: python -m core.mirror_images $ARGS"
+          python -m core.mirror_images $ARGS
