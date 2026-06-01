@@ -27,6 +27,17 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 SESSION_COOKIES: dict[str, str] = {}
 COOKIE_CACHE = Path(".cache/guazi-cookies.json")
 
+
+def _cookies_for_stealthy() -> list[dict] | None:
+    """Scrapling expects cookies as a list of {name, value, domain, path}
+    dicts (Playwright shape), not a flat name->value dict. Convert."""
+    if not SESSION_COOKIES:
+        return None
+    return [
+        {"name": k, "value": v, "domain": ".guazi.com", "path": "/"}
+        for k, v in SESSION_COOKIES.items()
+    ]
+
 # Persistent page cursor across self-chained runs. Each batch starts where
 # the previous one left off; wraps at PAGE_MAX so we re-scan the catalog
 # every so often (guazi rolls listings over time).
@@ -441,7 +452,7 @@ def fetch_list(
                 wait=2500,
                 disable_resources=True,
                 timeout=30000,
-                cookies=SESSION_COOKIES or None,
+                cookies=_cookies_for_stealthy(),
             )
             body = page.body.decode("utf-8", "replace")
             # Strategy 1: Scrapling CSS selector against the hydrated DOM.
@@ -653,7 +664,7 @@ def enrich_detail(l: Listing) -> Listing:
         wait=2000,
         disable_resources=True,
         timeout=30000,
-        cookies=SESSION_COOKIES or None,
+        cookies=_cookies_for_stealthy(),
     )
     status = getattr(page, "status", None)
     l.raw["detail_status"] = status
