@@ -17,8 +17,6 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling.fetchers import StealthyFetcher
 
-from core.oxylabs import OxylabsWSA
-
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -38,17 +36,33 @@ def _cookies_for_stealthy() -> list[dict] | None:
         for k, v in SESSION_COOKIES.items()
     ]
 
-# Persistent page cursor across self-chained runs. Each batch starts where
-# the previous one left off; wraps at PAGE_MAX so we re-scan the catalog
-# every so often (guazi rolls listings over time).
+# Persistent (brand_idx, page) cursor across self-chained runs. Each batch
+# starts where the previous one left off, advancing the brand pointer when
+# a brand runs out of pages. Wraps at end of brand list so we re-scan as
+# new listings appear.
 PAGE_CURSOR = Path(".cache/guazi-page.txt")
-PAGE_MAX = 200
+PAGE_MAX_PER_BRAND = 50  # safety cap per brand — most have <30 real pages
 
-# Oxylabs Web Scraper API endpoint for guazi's filter/list JSON. When the
-# Oxylabs creds are present in env, we POST list queries through WSA to
-# bypass Tencent EdgeOne's CAPTCHA wall — that gets us instant JSON in
-# ~1-2s vs ~9s through StealthyFetcher's Chromium boot.
-GUAZI_LIST_API = "https://en.guazi.com/os/facade/search/product/list?language=en"
+# Brand slugs to iterate. Order matters only for resume semantics — the
+# cursor stores an index into this list. Sourced from poisk_avto's working
+# scraper (collect_guazi_en.py); per-brand URLs like /used-cars/lexus/page1/
+# bypass the Tencent EdgeOne CAPTCHA wall that blocks the /used-cars/ root.
+BRAND_SLUGS: list[str] = [
+    "toyota", "volkswagen", "bmw", "mercedes-benz", "audi", "honda",
+    "nissan", "hyundai", "kia", "byd", "geely-auto", "chery",
+    "haval", "great-wall", "changan", "buick", "chevrolet", "ford",
+    "cadillac", "lincoln", "mazda", "subaru", "mitsubishi",
+    "tesla", "nio", "xpeng", "li-auto", "zeekr", "xiaomi-auto",
+    "volvo", "lexus", "infiniti", "porsche", "land-rover", "jaguar",
+    "bentley", "rolls-royce", "maserati", "ferrari", "lamborghini",
+    "peugeot", "citroen", "skoda", "renault", "smart", "mini", "mg",
+    "jetour", "tank", "lynk-co", "wey", "hongqi", "denza",
+    "voyah", "aion", "ora", "leapmotor", "neta", "arcfox",
+    "roewe", "wuling", "baojun", "dongfeng", "jac", "foton",
+    "gac-trumpchi", "aito", "jeep", "dodge", "chrysler",
+    "genesis", "acura", "alfa-romeo", "aston-martin", "mclaren",
+    "lotus", "suzuki", "ds",
+]
 
 # Parallel detail-fetch worker count. Each worker is a separate Chromium
 # context (~600-800 MB RAM with disable_resources=True), so 4 fits inside
@@ -270,22 +284,31 @@ def _login_and_capture_cookies(email: str, password: str) -> dict[str, str]:
     return cookies
 
 
-def _read_page_cursor() -> int:
+def _read_page_cursor() -> tuple[int, int]:
+    """Return (brand_idx, page_num). Accepts legacy bare-int format
+    (treats it as page on brand 0) so old caches don't crash a new run."""
     if PAGE_CURSOR.exists():
         try:
-            v = int(PAGE_CURSOR.read_text().strip())
-            return max(1, min(PAGE_MAX, v))
+            raw = PAGE_CURSOR.read_text().strip()
+            if ":" in raw:
+                bi, pn = raw.split(":", 1)
+                bi_i = max(0, min(len(BRAND_SLUGS) - 1, int(bi)))
+                pn_i = max(1, min(PAGE_MAX_PER_BRAND, int(pn)))
+                return bi_i, pn_i
+            # legacy format: bare page number → start at brand 0
+            return 0, max(1, min(PAGE_MAX_PER_BRAND, int(raw)))
         except Exception:
             pass
-    return 1
+    return 0, 1
 
 
-def _save_page_cursor(page: int) -> None:
+def _save_page_cursor(brand_idx: int, page: int) -> None:
     try:
         PAGE_CURSOR.parent.mkdir(parents=True, exist_ok=True)
-        # Wrap around at PAGE_MAX so we periodically revisit early pages
-        # (new listings appear at page 1; old ones drift back).
-        PAGE_CURSOR.write_text(str(((page - 1) % PAGE_MAX) + 1))
+        # Wrap brand_idx at end of list so we restart the sweep periodically.
+        bi = brand_idx % max(1, len(BRAND_SLUGS))
+        pn = max(1, min(PAGE_MAX_PER_BRAND, page))
+        PAGE_CURSOR.write_text(f"{bi}:{pn}")
     except Exception as e:
         print(f"[guazi] page cursor save failed: {e}", file=sys.stderr)
 
@@ -315,186 +338,144 @@ def _build_list_url(
     path: str = LIST_PATH,
     page_num: int = 1,
     params: dict[str, str] | None = None,
+    brand_slug: str | None = None,
 ) -> str:
+    """Build a guazi list URL.
+
+    When `brand_slug` is set, use the per-brand pagination format
+    (/used-cars/{brand}/page{N}/) — these URLs render SSR cards without
+    triggering the EdgeOne CAPTCHA wall that blocks the /used-cars/ root.
+    Page goes in the path, not as ?page=, to match guazi's actual SEO URLs.
+    """
     from urllib.parse import urlencode
     q = dict(params or {})
-    if page_num and page_num != 1:
-        q["page"] = str(page_num)
+    if brand_slug:
+        # Per-brand path. Page goes in the URL path like /used-cars/bmw/page2/.
+        path = f"/used-cars/{brand_slug}/page{max(1, page_num)}/"
+    else:
+        # Fallback: legacy /used-cars/?page=N (CAPTCHA-walled — kept for
+        # explicit --path /used-cars/<body-type>/ overrides).
+        if page_num and page_num != 1:
+            q["page"] = str(page_num)
     base = urljoin(BASE, path)
     return base + (("?" + urlencode(q, safe=",")) if q else "")
 
 
-def _params_to_api_body(params: dict[str, str] | None, page_num: int,
-                         page_size: int = 30) -> dict:
-    """Convert UI-style query params (price=8000,15000) to guazi's list-API
-    JSON shape. Best-effort — keys we don't recognize get dropped."""
-    body: dict = {
-        "language": "en",
-        "pageSize": page_size,
-        "pageNum": page_num,
-        "clientScene": "cars",
-        "sourceFrom": "wap",
-        "businessType": 5,
-        "countryCode": "",
-        # did/guid required by API. Random UUIDs accepted — no session binding.
-        "guid": "11111111-2222-3333-4444-555555555555",
-        "did": "DID177957158162000007",
-    }
-    for k, v in (params or {}).items():
-        if k == "price" and "," in v:
-            lo, hi = v.split(",", 1)
-            if lo: body["priceStart"] = int(lo)
-            if hi: body["priceEnd"] = int(hi)
-        elif k == "licenseYear" and "," in v:
-            lo, hi = v.split(",", 1)
-            if lo: body["licenseYearStart"] = int(lo)
-            if hi: body["licenseYearEnd"] = int(hi)
-        elif k == "roadHaul" and "," in v:
-            lo, hi = v.split(",", 1)
-            if lo: body["roadHaulStart"] = int(lo)
-            if hi: body["roadHaulEnd"] = int(hi)
-        elif k == "detectionLevels":
-            body["detectionLevels"] = v.split(",")
-        elif k == "vehicleSourceClassificationCustomers":
-            body["vehicleSourceClassificationCustomers"] = v.split(",")
-    return body
-
-
-def _hrefs_from_api(json_body: str | None) -> list[str]:
-    """Extract /products/<slug>.html paths from guazi list-API JSON.
-    Returns empty list if input isn't valid JSON with the expected shape."""
-    if not json_body:
-        return []
+def _fetch_list_page(url: str, seen: set[str]) -> list[str]:
+    """One list-page fetch. Returns new hrefs not in `seen`. Logs blocking
+    state on empty result."""
+    page = StealthyFetcher.fetch(
+        url,
+        headless=True,
+        network_idle=True,
+        humanize=True,
+        wait=2500,
+        disable_resources=True,
+        timeout=30000,
+        cookies=_cookies_for_stealthy(),
+    )
+    body = page.body.decode("utf-8", "replace")
+    # Strategy 1: hydrated DOM via CSS selector. Strategy 2: regex over raw
+    # body. Per-brand pages SSR the anchors so both usually agree.
+    dom_hrefs: list[str] = []
     try:
-        data = json.loads(json_body)
-    except json.JSONDecodeError:
-        return []
-    rows = ((data.get("data") or {}).get("list") or
-            (data.get("data") or {}).get("records") or
-            data.get("list") or [])
-    out: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
+        for el in page.css('a[href*="/products/"]'):
+            h = el.attrib.get("href") if hasattr(el, "attrib") else None
+            if h is None and hasattr(el, "get"):
+                h = el.get("href")
+            if h and h.endswith(".html"):
+                dom_hrefs.append(h if h.startswith("/") else "/" + h.lstrip("/"))
+    except Exception as e:
+        print(f"[guazi] DOM selector failed: {e}", file=sys.stderr)
+    regex_hrefs = DETAIL_HREF_RE.findall(body)
+    local_seen: set[str] = set()
+    hrefs: list[str] = []
+    for h in dom_hrefs + regex_hrefs:
+        if h in seen or h in local_seen:
             continue
-        # Try several known shapes for slug / url field.
-        slug = row.get("slug") or row.get("productSlug") or row.get("seoSlug")
-        url = row.get("url") or row.get("productUrl")
-        clue = row.get("clueId") or row.get("clueid") or row.get("productId")
-        if slug:
-            out.append(f"/products/{slug}.html")
-        elif url and "/products/" in url:
-            out.append(url[url.index("/products/"):])
-        elif clue:
-            out.append(f"/products/{clue}.html")
-    return out
+        local_seen.add(h)
+        hrefs.append(h)
+    print(f"[guazi]   body {len(body)} bytes, dom={len(dom_hrefs)} "
+          f"regex={len(regex_hrefs)} unique={len(hrefs)}", file=sys.stderr)
+    if not hrefs:
+        head = body[:400].replace("\n", " ").replace("\r", " ")
+        print(f"[guazi]   DEBUG body head: {head}", file=sys.stderr)
+        if "captcha" in body.lower() or "verification" in body.lower():
+            print(f"[guazi]   DEBUG blocked (captcha/verification)", file=sys.stderr)
+    return hrefs
 
 
 def fetch_list(
     limit: int = 10,
     path: str = LIST_PATH,
     params: dict[str, str] | None = None,
-    max_pages: int = 50,
+    max_pages: int = PAGE_MAX_PER_BRAND,
     max_mileage_km: int | None = None,
     min_year: int | None = None,
     max_year: int | None = None,
 ) -> list[Listing]:
+    """Per-brand sweep: iterate brand pages until `limit` listings collected.
+
+    Resume from persistent (brand_idx, page_num) cursor. When the current
+    page yields 0 hrefs (end of brand), advance to next brand at page 1.
+    The /used-cars/<body-type>/ override (--path) skips brand iteration and
+    walks pages within that single path.
+    """
     out: list[Listing] = []
     seen: set[str] = set()
     skipped = 0
-    page_num = _read_page_cursor()
-    start_page = page_num
-    print(f"[guazi] starting from page {page_num} (wrap at {PAGE_MAX})",
-          file=sys.stderr)
     _ensure_session()
-    wsa = OxylabsWSA()
-    use_api = wsa.enabled
-    if use_api:
-        print(f"[guazi] list source: Oxylabs WSA -> JSON API (geo={wsa.geo!r})",
-              file=sys.stderr)
+
+    # Per-brand iteration mode only kicks in when path is the default
+    # /used-cars/ root. Anything else (e.g. --path /used-cars/sedan/) walks
+    # pages directly without brand swap.
+    brand_mode = path == LIST_PATH
+    brand_idx, page_num = _read_page_cursor()
+    if not brand_mode:
+        brand_idx = 0  # ignored
+        # legacy cursor for explicit-path mode
+        page_num = max(1, page_num)
+
+    start_brand = brand_idx
+    start_page = page_num
+    pages_visited = 0
+
+    if brand_mode:
+        print(f"[guazi] brand sweep: start at brand[{brand_idx}]="
+              f"{BRAND_SLUGS[brand_idx]!r}, page {page_num}", file=sys.stderr)
     else:
-        print(f"[guazi] list source: StealthyFetcher (no Oxylabs creds)",
-              file=sys.stderr)
-    while len(out) < limit and page_num <= max_pages:
-        hrefs: list[str] = []
-        if use_api:
-            api_body = _params_to_api_body(params, page_num, page_size=max(20, limit))
-            t0 = time.time()
-            resp = wsa.post_json(
-                GUAZI_LIST_API,
-                api_body,
-                headers={"content-type": "application/json",
-                         "origin": "https://en.guazi.com",
-                         "referer": "https://en.guazi.com/used-cars/"},
-            )
-            print(f"[guazi] list p{page_num} API: {time.time()-t0:.1f}s "
-                  f"({len(resp) if resp else 0} bytes)", file=sys.stderr)
-            if resp:
-                # Debug: first 300 chars of response so we can see what guazi
-                # said when API returns 0 hrefs.
-                preview = resp.replace("\n", " ").replace("\r", " ")[:300]
-                print(f"[guazi]   response preview: {preview}", file=sys.stderr)
-            hrefs = [h for h in _hrefs_from_api(resp) if h not in seen]
-            if not hrefs:
-                # API returned nothing usable (captcha / shape change) —
-                # fall back to HTML scrape for this page.
-                print(f"[guazi] API gave 0 hrefs on p{page_num}, falling back to Stealthy",
-                      file=sys.stderr)
-                use_api = False
+        print(f"[guazi] path mode: {path}, start page {page_num}", file=sys.stderr)
+
+    while len(out) < limit and pages_visited < max_pages:
+        brand_slug = BRAND_SLUGS[brand_idx] if brand_mode else None
+        url = _build_list_url(path, page_num, params, brand_slug=brand_slug)
+        label = f"{brand_slug} p{page_num}" if brand_slug else f"p{page_num}"
+        print(f"[guazi] list {label}: {url}", file=sys.stderr)
+        try:
+            hrefs = _fetch_list_page(url, seen)
+        except Exception as e:
+            print(f"[guazi] fetch error {label}: {e}", file=sys.stderr)
+            hrefs = []
+        pages_visited += 1
 
         if not hrefs:
-            url = _build_list_url(path, page_num, params)
-            print(f"[guazi] list p{page_num}: {url}", file=sys.stderr)
-            page = StealthyFetcher.fetch(
-                url,
-                headless=True,
-                network_idle=True,
-                humanize=True,
-                wait=2500,
-                disable_resources=True,
-                timeout=30000,
-                cookies=_cookies_for_stealthy(),
-            )
-            body = page.body.decode("utf-8", "replace")
-            # Strategy 1: Scrapling CSS selector against the hydrated DOM.
-            # poisk_avto's old scraper grabbed hrefs this way — anchors are
-            # attached by client JS after hydration, so raw-HTML regex misses
-            # them. Strategy 2 (fallback): the regex, in case SSR comes back.
-            dom_hrefs: list[str] = []
-            try:
-                for el in page.css('a[href*="/products/"]'):
-                    h = el.attrib.get("href") if hasattr(el, "attrib") else None
-                    if h is None and hasattr(el, "get"):
-                        h = el.get("href")
-                    if h and h.endswith(".html"):
-                        dom_hrefs.append(h if h.startswith("/") else "/" + h.lstrip("/"))
-            except Exception as e:
-                print(f"[guazi] DOM selector failed: {e}", file=sys.stderr)
-            regex_hrefs = DETAIL_HREF_RE.findall(body)
-            local_seen: set[str] = set()
-            hrefs = []
-            for h in dom_hrefs + regex_hrefs:
-                if h in seen or h in local_seen:
-                    continue
-                local_seen.add(h)
-                hrefs.append(h)
-            print(f"[guazi] body {len(body)} bytes, dom={len(dom_hrefs)} "
-                  f"regex={len(regex_hrefs)} unique={len(hrefs)}", file=sys.stderr)
-            if not hrefs:
-                head = body[:600].replace("\n", " ").replace("\r", " ")
-                print(f"[guazi] DEBUG body head: {head}", file=sys.stderr)
-                if "captcha" in body.lower() or "verification" in body.lower():
-                    print(f"[guazi] DEBUG body contains 'captcha'/'verification' — blocked",
-                          file=sys.stderr)
-                ID_KEYS = ("clueId", "productSlug", "productId", "slug",
-                           "seoUrl", "seo_url", "detailUrl", "productDetailUrl")
-                for key in ID_KEYS:
-                    samples = re.findall(rf'"{key}"\s*:\s*"([^"]{{4,80}})"', body)[:5]
-                    if samples:
-                        print(f"[guazi] DEBUG found {key} samples: {samples}",
-                              file=sys.stderr)
-        if not hrefs:
-            print(f"[guazi] no new hrefs on p{page_num}, stop", file=sys.stderr)
-            break
+            if brand_mode:
+                # End of this brand → advance to next brand at page 1.
+                # Wrap at end of BRAND_SLUGS so the sweep restarts.
+                brand_idx = (brand_idx + 1) % len(BRAND_SLUGS)
+                page_num = 1
+                print(f"[guazi]   brand exhausted, advancing to "
+                      f"brand[{brand_idx}]={BRAND_SLUGS[brand_idx]!r}",
+                      file=sys.stderr)
+                # If we've come full circle this batch, stop.
+                if brand_idx == start_brand and pages_visited > 1:
+                    print(f"[guazi]   full sweep complete, stopping", file=sys.stderr)
+                    break
+                continue
+            else:
+                print(f"[guazi]   no new hrefs, stop", file=sys.stderr)
+                break
+
         for h in hrefs:
             seen.add(h)
             slug = Path(urlparse(h).path).stem
@@ -513,11 +494,18 @@ def fetch_list(
             if len(out) >= limit:
                 break
         page_num += 1
-    # Persist next page for the following self-chained run.
-    _save_page_cursor(page_num)
-    print(f"[guazi] total parsed: {len(out)} (skipped {skipped}, "
-          f"pages {start_page}-{page_num - 1}, next start={((page_num - 1) % PAGE_MAX) + 1})",
-          file=sys.stderr)
+
+    # Persist cursor for next self-chained run.
+    if brand_mode:
+        _save_page_cursor(brand_idx, page_num)
+        next_brand = BRAND_SLUGS[brand_idx % len(BRAND_SLUGS)]
+        print(f"[guazi] total parsed: {len(out)} (skipped {skipped}, "
+              f"visited {pages_visited} pages, next={next_brand} p{page_num})",
+              file=sys.stderr)
+    else:
+        _save_page_cursor(0, page_num)
+        print(f"[guazi] total parsed: {len(out)} (skipped {skipped}, "
+              f"pages {start_page}-{page_num - 1})", file=sys.stderr)
     return out
 
 
