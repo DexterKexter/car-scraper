@@ -776,26 +776,46 @@ def _parse_spec_list(joined: str) -> dict:
     return out
 
 
-def enrich_detail(l: Listing) -> Listing:
-    print(f"[guazi] detail: {l.url}", file=sys.stderr)
-    page = StealthyFetcher.fetch(
-        l.url,
+def _fetch_detail_page(url: str):
+    # Keep resources enabled (disable_resources=False): some guazi templates
+    # only inject the full <img> gallery once the page is fully laid out, so
+    # blocking images/css can leave us with just the og:image cover.
+    return StealthyFetcher.fetch(
+        url,
         headless=True,
         network_idle=True,
         humanize=True,
-        wait=2000,
-        disable_resources=True,
+        wait=2500,
+        disable_resources=False,
         timeout=30000,
         cookies=_cookies_for_stealthy(),
     )
+
+
+def enrich_detail(l: Listing) -> Listing:
+    print(f"[guazi] detail: {l.url}", file=sys.stderr)
+    page = _fetch_detail_page(l.url)
     status = getattr(page, "status", None)
+    body = page.body.decode("utf-8", "replace") if getattr(page, "body", None) else ""
+
+    # Anti-bot / login wall returns a tiny stub (~2 KB, no gallery, no
+    # og:image); the real listing is ~700 KB with its full <img> gallery
+    # already in the HTML. The wall is intermittent per-listing, so retry
+    # once before settling — this is what turns the common "1 photo only"
+    # (cover/og:image salvaged from a walled page) into the full gallery.
+    if (not status or status < 400) and ("og:image" not in body or len(body) < 50_000):
+        print(f"[guazi] thin/walled detail ({len(body)}B) for {l.url} — retry once",
+              file=sys.stderr)
+        page = _fetch_detail_page(l.url)
+        status = getattr(page, "status", None)
+        body = page.body.decode("utf-8", "replace") if getattr(page, "body", None) else ""
+
     l.raw["detail_status"] = status
     # Skip parsing on HTTP errors — the body is an error page, not the listing.
     if status and isinstance(status, int) and status >= 400:
         print(f"[guazi] detail HTTP {status} for {l.url} — skip enrichment",
               file=sys.stderr)
         return l
-    body = page.body.decode("utf-8", "replace")
 
     metas = _parse_metas(body)
     ld = _parse_jsonld(body)

@@ -20,6 +20,9 @@ import httpx
 LIST_URL = "https://api.encar.com/search/car/list/premium"
 DETAIL_URL = "http://api.encar.com/v1/readside/vehicle/{id}"
 PHOTO_HOST = "https://ci.encar.com"
+# ci.encar.com serves a small thumbnail for the bare path; this policy
+# query string renders the full-resolution image (≈287 KB vs ≈45 KB).
+PHOTO_HD_QS = "?impolicy=heightRate&rh=1080&cw=1920&ch=1080&cg=Center"
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -71,15 +74,24 @@ class Listing:
 def _photo_urls(photos: list[dict]) -> list[str]:
     out: list[str] = []
     for p in photos or []:
-        loc = p.get("location") if isinstance(p, dict) else None
+        if not isinstance(p, dict):
+            continue
+        # Detail API photo dicts key the path as `path` (full set, ~26);
+        # search-list cards key it as `location` (only ~4 thumbnails).
+        # Read both so the detail gallery isn't silently dropped.
+        loc = p.get("path") or p.get("location")
         if not loc:
             continue
         # Guard against absolute URLs (rare but possible) — only prefix
         # PHOTO_HOST when the path starts with `/`.
         if loc.startswith("http://") or loc.startswith("https://"):
-            out.append(loc)
+            url = loc
         else:
-            out.append(PHOTO_HOST + (loc if loc.startswith("/") else "/" + loc))
+            url = PHOTO_HOST + (loc if loc.startswith("/") else "/" + loc)
+        # Upgrade ci.encar.com thumbnails to full resolution.
+        if PHOTO_HOST in url and "impolicy" not in url:
+            url += PHOTO_HD_QS
+        out.append(url)
     return out
 
 
