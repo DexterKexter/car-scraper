@@ -375,11 +375,15 @@ async ({limit, filters, guid, did, PS, CAP}) => {
   const post = async (pn) => {
     const body = {language:'en', businessType:5, clientScene:'cars', sourceFrom:'wap',
       countryCode:'', guid, did, pageSize:PS, pageNum:pn, sort:'created_at desc'};
-    const r = await fetch('/os/facade/search/product/list?language=en', {
-      method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify(body), credentials:'include'});
-    const j = await r.json();
-    return (j.data && j.data.list) || [];
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);  // never block forever
+    try {
+      const r = await fetch('/os/facade/search/product/list?language=en', {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify(body), credentials:'include', signal: ctrl.signal});
+      const j = await r.json();
+      return (j.data && j.data.list) || [];
+    } finally { clearTimeout(timer); }
   };
   const yearOf = (m) => (m && /^\d{4}/.test(m)) ? Number(m.slice(0,4)) : null;
   const gradeOf = (labels) => {
@@ -409,8 +413,9 @@ async ({limit, filters, guid, did, PS, CAP}) => {
   };
 
   const items = [], seen = new Set();
+  const deadline = Date.now() + 60000;  // hard wall so page.evaluate can't hang
   let pn = 1, pages = 0;
-  while (items.length < limit && (pn - 1) * PS < CAP) {
+  while (items.length < limit && (pn - 1) * PS < CAP && Date.now() < deadline) {
     let lst;
     try { lst = await post(pn); } catch (e) { break; }
     pages++;
