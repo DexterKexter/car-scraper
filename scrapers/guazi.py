@@ -351,7 +351,23 @@ def _ensure_session() -> None:
               file=sys.stderr)
 
 
-BRAND_HREF_RE = re.compile(r'href="(/used-cars/([a-z][a-z0-9-]{1,40})/?)"')
+BRAND_HREF_RE = re.compile(r'/used-cars/([a-z][a-z0-9-]{1,40})/')
+# Suffix tokens that mean "this isn't a pure-brand URL" — filter URLs,
+# transmission/body/price/mileage facets that guazi exposes as SEO landing
+# pages. Matches anywhere in the slug after a dash.
+BRAND_NOISE_RE = re.compile(
+    r'-(?:automatic|manual|mt|at|cvt|amt|dct|miles?|price|color|sedan|suv|'
+    r'hatchback|wagon|coupe|convertible|pickup|pick-up|mpv|van|truck|under|'
+    r'over|from|to|years?|model|million|dollar|fuel|cylinder|engine|hp|'
+    r'horsepower|displacement|liter|litre|seater|seats?|drive|awd|4wd|2wd|'
+    r'fwd|rwd)(?:-|$)'
+)
+# Color / cosmetic prefixes that indicate a "color filter" SEO page
+# (e.g. /used-cars/gray-toyota-gac-toyota-bz4x/).
+BRAND_PREFIX_NOISE_RE = re.compile(
+    r'^(?:white|black|red|blue|silver|gray|grey|green|gold|brown|yellow|'
+    r'orange|purple|beige|pearl|champagne|bronze|copper|pink|navy|ivory)-'
+)
 
 
 def _load_cached_brands() -> list[str]:
@@ -397,33 +413,29 @@ def _discover_brands() -> list[str]:
         print(f"[guazi] discovery fetch failed: {e}", file=sys.stderr)
         return []
 
-    # Strategy 1: hydrated DOM. Strategy 2: regex against raw body.
-    found: set[str] = set()
-    try:
-        for el in page.css('a[href*="/used-cars/"]'):
-            h = el.attrib.get("href") if hasattr(el, "attrib") else None
-            if h is None and hasattr(el, "get"):
-                h = el.get("href")
-            if not h:
-                continue
-            m = re.match(r"/used-cars/([a-z][a-z0-9-]{1,40})/?$", h)
-            if m:
-                found.add(m.group(1))
-    except Exception as e:
-        print(f"[guazi] discovery DOM selector failed: {e}", file=sys.stderr)
+    # Raw-body regex: brand links live inside Next.js JSON-streamed payload
+    # (self.__next_f.push), not as actual <a href> tags, so DOM lookup misses
+    # them. Match any /used-cars/<slug>/ in the body and filter the noise.
+    raw = set(BRAND_HREF_RE.findall(body))
 
-    for _, slug in BRAND_HREF_RE.findall(body):
-        found.add(slug)
+    def _is_brand(slug: str) -> bool:
+        if slug in NON_BRAND_SLUGS:
+            return False
+        if BRAND_PREFIX_NOISE_RE.match(slug):
+            return False
+        if BRAND_NOISE_RE.search(slug):
+            return False
+        return True
 
-    brands = sorted(s for s in found if s not in NON_BRAND_SLUGS)
+    brands = sorted(s for s in raw if _is_brand(s))
     print(f"[guazi] discovered {len(brands)} brand candidates "
-          f"(raw {len(found)})", file=sys.stderr)
-    if not brands:
-        # Dump first 20 unique /used-cars/* patterns in body — helps see
-        # whether brand-nav is JSON-streamed, react-routed, or absent.
-        any_uc = sorted(set(re.findall(r'/used-cars/[a-z][a-z0-9-]{1,40}/?', body)))
-        print(f"[guazi]   DEBUG body /used-cars/ matches ({len(any_uc)}): "
-              f"{any_uc[:30]}", file=sys.stderr)
+          f"(raw {len(raw)})", file=sys.stderr)
+    if brands:
+        print(f"[guazi]   sample: {brands[:15]}", file=sys.stderr)
+    else:
+        sample = sorted(raw)[:30]
+        print(f"[guazi]   DEBUG raw body /used-cars/ matches ({len(raw)}): "
+              f"{sample}", file=sys.stderr)
     return brands
 
 
