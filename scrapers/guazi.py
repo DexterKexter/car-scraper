@@ -351,45 +351,40 @@ def _ensure_session() -> None:
               file=sys.stderr)
 
 
-# ───────────────────────── JSON facade API (AUT-73) ─────────────────────────
-# Listing now comes from the same JSON endpoint the site's own front-end calls,
-# instead of scraping SSR HTML page-by-page. One EdgeOne-cleared browser page is
-# opened (via StealthyFetcher's page_action hook); every list query then runs as
-# an in-page fetch(), so we pay one Chromium load per run instead of one per list
-# page. Full reverse-engineered spec: Linear AUT-73.
+# ──────────────────── JSON facade API · fresh mode (AUT-73/74) ───────────────
+# Listing comes from the JSON endpoint the site's own front-end calls. One
+# EdgeOne-cleared browser page is opened (StealthyFetcher's page_action hook);
+# all list queries run as in-page fetch() — one Chromium load per run.
+#
+# Fresh mode: a single global query sorted by listing date (sort=created_at
+# desc) returns the newest-posted cars. We page through the newest ~500 and
+# value-filter in-page; the (source, source_id) upsert dedups, so a re-seen car
+# just bumps last_seen and a genuinely new one inserts. The ~500 offset cap is a
+# non-issue — anything older than the newest ~500 was caught by an earlier run.
 API_LIST_PATH = "/os/facade/search/product/list?language=en"
-API_BRANDS_PATH = "/os/product/filter/queryBrandList?language=en"
 LIST_PAGE_SIZE = 30      # hard server max (>=31 → 每页数超过最大查询阈值)
 OFFSET_CAP = 480         # server exposes only ~first 500 rows of any one query
-MAX_JOBS_PER_RUN = 80    # cap (brandId,seriesId) jobs per batch so a single
-                         # page_action stays well under the fetch timeout
-JOB_CURSOR = Path(".cache/guazi-job.txt")  # "<job_idx>:<page>" across self-chains
+# sort=created_at desc → newest by listing/posting date (verified: every item
+# carries the "Newly listed" label, mfg years mixed).
 
-# Runs inside the EdgeOne-cleared page. Builds the brand×series job list from
-# queryBrandList, resumes at (startIdx, startPage), paginates each series to the
-# offset cap, value-filters against list-level fields, and collects up to `limit`
-# items. Returns {items, nextIdx, nextPage, totalJobs, visited}. Every field it
-# filters on is in the list payload, so no detail fetch is needed to filter.
-_JS_SWEEP = r"""
-async ({startIdx, startPage, limit, filters, guid, did, PS, CAP, MAXJOBS}) => {
+# Runs inside the EdgeOne-cleared page: page the newest-first listing, value-
+# filter against list fields, collect up to `limit`. Returns {items, pages}.
+_JS_FRESH = r"""
+async ({limit, filters, guid, did, PS, CAP}) => {
   const f = filters || {};
-  const post = async (brandId, seriesId, pn) => {
+  const post = async (pn) => {
     const body = {language:'en', businessType:5, clientScene:'cars', sourceFrom:'wap',
-      countryCode:'', guid, did, pageSize:PS, pageNum:pn, brandId, seriesIds:[seriesId]};
-    const r = await fetch('/os/facade/search/product/list?language=en', {
-      method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify(body), credentials:'include'});
-    const j = await r.json();
-    return (j.data && j.data.list) || [];
+      countryCode:'', guid, did, pageSize:PS, pageNum:pn, sort:'created_at desc'};
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);  // never block forever
+    try {
+      const r = await fetch('/os/facade/search/product/list?language=en', {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify(body), credentials:'include', signal: ctrl.signal});
+      const j = await r.json();
+      return (j.data && j.data.list) || [];
+    } finally { clearTimeout(timer); }
   };
-  const br = await (await fetch('/os/product/filter/queryBrandList?language=en', {credentials:'include'})).json();
-  const groups = (br.data && br.data.brands) || {};
-  const jobs = [];
-  for (const k in groups) for (const b of groups[k])
-    for (const t of (b.tags || [])) jobs.push([b.id, t.id]);
-  const total = jobs.length;
-  if (!total) return {items:[], nextIdx:0, nextPage:1, totalJobs:0, visited:0};
-
   const yearOf = (m) => (m && /^\d{4}/.test(m)) ? Number(m.slice(0,4)) : null;
   const gradeOf = (labels) => {
     for (const l of labels || []) if (l.type === 2) {
@@ -418,40 +413,24 @@ async ({startIdx, startPage, limit, filters, guid, did, PS, CAP, MAXJOBS}) => {
   };
 
   const items = [], seen = new Set();
-  let i = startIdx % total, visited = 0;
-  let resumeIdx = i, resumePage = 1;
-  while (items.length < limit && visited < total && visited < MAXJOBS) {
-    const [brandId, seriesId] = jobs[i % total];
-    let pn = (visited === 0) ? Math.max(1, startPage) : 1;
-    let exhausted = false, stoppedAt = pn;
-    while ((pn - 1) * PS < CAP) {
-      let lst;
-      try { lst = await post(brandId, seriesId, pn); } catch (e) { exhausted = true; break; }
-      if (!lst.length) { exhausted = true; break; }
-      for (const it of lst) {
-        const id = it.productId || it.seoUri;
-        if (id && seen.has(id)) continue;
-        if (id) seen.add(id);
-        if (keep(it)) items.push(it);
-        if (items.length >= limit) break;
-      }
-      stoppedAt = pn;
-      if (lst.length < PS) { exhausted = true; break; }
+  const deadline = Date.now() + 60000;  // hard wall so page.evaluate can't hang
+  let pn = 1, pages = 0;
+  while (items.length < limit && (pn - 1) * PS < CAP && Date.now() < deadline) {
+    let lst;
+    try { lst = await post(pn); } catch (e) { break; }
+    pages++;
+    if (!lst.length) break;
+    for (const it of lst) {
+      const id = it.productId || it.seoUri;
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      if (keep(it)) items.push(it);
       if (items.length >= limit) break;
-      pn++;
     }
-    if (items.length >= limit && !exhausted) {
-      // stop mid-series: resume this same series at the next page next run
-      const nextPage = stoppedAt + 1;
-      if ((nextPage - 1) * PS < CAP) { resumeIdx = i % total; resumePage = nextPage; }
-      else { resumeIdx = (i + 1) % total; resumePage = 1; }
-      visited++;
-      break;
-    }
-    i++; visited++;
-    resumeIdx = i % total; resumePage = 1;
+    if (lst.length < PS) break;
+    pn++;
   }
-  return {items, nextIdx: resumeIdx, nextPage: resumePage, totalJobs: total, visited};
+  return {items, pages};
 }
 """
 
@@ -502,26 +481,6 @@ def _run_in_page(job_fn):
     if "error" in holder:
         raise holder["error"]
     return holder.get("result")
-
-
-def _read_job_cursor() -> tuple[int, int]:
-    """Return (job_idx, page). Tolerates a missing/legacy cache → (0, 1)."""
-    try:
-        raw = JOB_CURSOR.read_text().strip()
-        if ":" in raw:
-            idx, pn = raw.split(":", 1)
-            return max(0, int(idx)), max(1, int(pn))
-        return max(0, int(raw)), 1
-    except Exception:
-        return 0, 1
-
-
-def _save_job_cursor(idx: int, page: int) -> None:
-    try:
-        JOB_CURSOR.parent.mkdir(parents=True, exist_ok=True)
-        JOB_CURSOR.write_text(f"{max(0, idx)}:{max(1, page)}")
-    except Exception as e:
-        print(f"[guazi] job cursor save failed: {e}", file=sys.stderr)
 
 
 BRAND_HREF_RE = re.compile(r'/used-cars/([a-z][a-z0-9-]{1,40})/')
@@ -937,36 +896,32 @@ def fetch_list_api(
     max_mileage_km: int | None = None,
     grades: set[str] | None = None,
 ) -> list[Listing]:
-    """Brand×series sweep over the JSON facade API (replaces the SSR-HTML
-    per-page scrape for the default /used-cars/ root). Resumes from a persistent
-    (job_idx, page) cursor; value-filters in-page; returns mapped Listings."""
+    """Fresh-mode sweep over the JSON facade API (replaces the SSR-HTML per-page
+    scrape for the default /used-cars/ root). Pages the newest-first listing
+    (sort=created_at desc), value-filters in-page, returns mapped Listings up to
+    `limit`. Cursorless — always starts at the newest; the (source, source_id)
+    upsert dedups across runs."""
     _ensure_session()
     filters = _filters_from_params(params, min_year, max_year, max_mileage_km, grades)
-    start_idx, start_page = _read_job_cursor()
-    print(f"[guazi] api sweep: start job {start_idx}:{start_page}, limit {limit}, "
+    print(f"[guazi] fresh sweep (sort=created_at desc): limit {limit}, "
           f"filters {filters}", file=sys.stderr)
 
     def _job(page):
         guid, did = _parse_guid_did(page.evaluate("() => document.cookie"))
         if not guid or not did:
             raise RuntimeError("no guid/global_did cookie after homepage load")
-        return page.evaluate(_JS_SWEEP, {
-            "startIdx": start_idx, "startPage": start_page, "limit": limit,
-            "filters": filters, "guid": guid, "did": did,
-            "PS": LIST_PAGE_SIZE, "CAP": OFFSET_CAP, "MAXJOBS": MAX_JOBS_PER_RUN,
+        return page.evaluate(_JS_FRESH, {
+            "limit": limit, "filters": filters, "guid": guid, "did": did,
+            "PS": LIST_PAGE_SIZE, "CAP": OFFSET_CAP,
         })
 
     res = _run_in_page(_job) or {}
     raw = res.get("items") or []
-    next_idx = int(res.get("nextIdx", start_idx))
-    next_page = int(res.get("nextPage", 1))
-    total_jobs = res.get("totalJobs")
-    _save_job_cursor(next_idx, next_page)
-    print(f"[guazi] api sweep: {len(raw)} items, visited {res.get('visited')} "
-          f"of {total_jobs} jobs, next {next_idx}:{next_page}", file=sys.stderr)
-    if not total_jobs:
-        print("[guazi] WARNING: empty brand matrix (queryBrandList returned "
-              "nothing) — EdgeOne block or API change?", file=sys.stderr)
+    print(f"[guazi] fresh sweep: {len(raw)} items over {res.get('pages')} pages",
+          file=sys.stderr)
+    if not raw:
+        print("[guazi] WARNING: 0 items — EdgeOne block, API change, or filters "
+              "too strict?", file=sys.stderr)
     return [_listing_from_api(it) for it in raw]
 
 

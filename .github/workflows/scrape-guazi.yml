@@ -83,19 +83,15 @@ jobs:
           restore-keys: |
             guazi-cookies-
 
-      # Persistent cursors — self-chained runs advance the cursor so batch N+1
-      # picks up where batch N stopped, sweeping the whole catalog instead of
-      # re-scraping from the start every time. guazi-job.txt = API brand×series
-      # cursor (default root sweep); guazi-page.txt = legacy SSR --path cursor.
-      - name: Restore guazi cursors
+      # Legacy SSR --path cursor. The default root sweep is fresh mode
+      # (sort=created_at desc, AUT-74) — cursorless, always starts at the
+      # newest — so only the SSR override path needs a persisted cursor.
+      - name: Restore guazi page cursor
         uses: actions/cache@v4
         with:
-          path: |
-            .cache/guazi-job.txt
-            .cache/guazi-page.txt
-          key: guazi-cursor-${{ github.run_id }}
+          path: .cache/guazi-page.txt
+          key: guazi-page-${{ github.run_id }}
           restore-keys: |
-            guazi-cursor-
             guazi-page-
 
       # Brand list cache (7-day TTL inside guazi.py). Refreshed automatically
