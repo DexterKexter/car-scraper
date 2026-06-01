@@ -140,6 +140,21 @@ def main():
         print(f"[pipeline] {len(rows)} car rows ready to upsert", file=sys.stderr)
         n = db_rest.upsert_cars(client, key, rows)
     print(f"[pipeline] upserted {n} in {time.time()-t2:.1f}s", file=sys.stderr)
+
+    # 4) MIRROR blocked CDN images into Supabase Storage. Runs in-line so the
+    # raw guazi/che168 URLs this batch just upserted are rehosted in the same
+    # run — a self-chaining scrape would otherwise keep overwriting already
+    # -mirrored URLs with raw ones, flickering the catalog broken.
+    try:
+        from core import mirror_images
+        t3 = time.time()
+        mirrored = mirror_images.mirror_rows(rows)
+        if mirrored:
+            print(f"[pipeline] mirrored {mirrored} images in "
+                  f"{time.time()-t3:.1f}s", file=sys.stderr)
+    except Exception as e:
+        print(f"[pipeline] mirror step failed (non-fatal): {e}", file=sys.stderr)
+
     print(f"[pipeline] DONE in {time.time()-t0:.1f}s total", file=sys.stderr)
 
 
