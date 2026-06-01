@@ -1,12 +1,12 @@
 """AI normalizer via OpenRouter.
 
-Reads scraper output JSON, sends batches to an LLM (default Claude Haiku 4.5
+Reads scraper output JSON, sends batches to an LLM (default DeepSeek V4 Pro
 via OpenRouter), returns canonical brand/model/trim per listing.
 Local sqlite cache dedupes calls across runs.
 
 Env:
   OPENROUTER_API_KEY    required to call the model
-  OPENROUTER_MODEL      optional, default anthropic/claude-haiku-4.5
+  OPENROUTER_MODEL      optional, default deepseek/deepseek-v4-pro
 
 Usage:
   python -m core.normalizer raw.json norm.json [--model X] [--batch 20]
@@ -28,7 +28,7 @@ import httpx
 from core.kolesa_index import KolesaIndex
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
+DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 CACHE_PATH = Path(".cache/normalizer.sqlite")
 BATCH_SIZE = 20
 TIMEOUT = 60.0
