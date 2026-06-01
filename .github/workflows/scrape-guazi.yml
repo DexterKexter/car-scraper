@@ -7,11 +7,11 @@ on:
         description: "Path filter: /used-cars/, /used-cars/<brand>/, /used-cars/<brand>/<model>/, /used-cars/<body>/"
         default: "/used-cars/"
       filters:
-        description: "Query filters, space-separated key=value. Supported: price=MIN,MAX | horsepower=MIN,MAX | tradeType=buyItNow|sealedBid"
-        default: ""
+        description: "Query filters, space-separated key=value. Default = Guazi-Owned+Certified, S/A grades, $8000+, 2020+, <=100k km"
+        default: "vehicleSourceClassificationCustomers=180003,180002 price=8000, licenseYear=2020, roadHaul=0,100000 detectionLevels=S,A"
       limit:
         description: "Number of listings"
-        default: "10"
+        default: "40"
       detail:
         description: "Enrich detail pages (true/false)"
         default: "true"
@@ -83,6 +83,17 @@ jobs:
           restore-keys: |
             guazi-cookies-
 
+      # Persistent page cursor — self-chained runs advance the cursor so
+      # batch N+1 picks up where batch N stopped, sweeping the whole catalog
+      # instead of re-scraping page 1 every time.
+      - name: Restore guazi page cursor
+        uses: actions/cache@v4
+        with:
+          path: .cache/guazi-page.txt
+          key: guazi-page-${{ github.run_id }}
+          restore-keys: |
+            guazi-page-
+
       - name: Pipeline (scrape -> normalize -> upsert)
         env:
           PYTHONUNBUFFERED: "1"
@@ -97,8 +108,8 @@ jobs:
         run: |
           # Build args. Cron runs use defaults; workflow_dispatch passes inputs.
           PATH_ARG="${{ github.event.inputs.path || '/used-cars/' }}"
-          LIMIT="${{ github.event.inputs.limit || '10' }}"
-          FILTERS="${{ github.event.inputs.filters }}"
+          LIMIT="${{ github.event.inputs.limit || '40' }}"
+          FILTERS="${{ github.event.inputs.filters || 'vehicleSourceClassificationCustomers=180003,180002 price=8000, licenseYear=2020, roadHaul=0,100000 detectionLevels=S,A' }}"
           DETAIL="${{ github.event.inputs.detail || 'true' }}"
           GRADES="${{ github.event.inputs.grades }}"
           MAX_MILEAGE="${{ github.event.inputs.max_mileage_km }}"
@@ -149,4 +160,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sleep 15
-          gh workflow run scrape-guazi.yml --ref ${{ github.ref_name }} -f limit=10
+          gh workflow run scrape-guazi.yml --ref ${{ github.ref_name }} -f limit=40

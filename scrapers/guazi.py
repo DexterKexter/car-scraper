@@ -27,6 +27,12 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 SESSION_COOKIES: dict[str, str] = {}
 COOKIE_CACHE = Path(".cache/guazi-cookies.json")
 
+# Persistent page cursor across self-chained runs. Each batch starts where
+# the previous one left off; wraps at PAGE_MAX so we re-scan the catalog
+# every so often (guazi rolls listings over time).
+PAGE_CURSOR = Path(".cache/guazi-page.txt")
+PAGE_MAX = 200
+
 # Oxylabs Web Scraper API endpoint for guazi's filter/list JSON. When the
 # Oxylabs creds are present in env, we POST list queries through WSA to
 # bypass Tencent EdgeOne's CAPTCHA wall — that gets us instant JSON in
@@ -253,6 +259,26 @@ def _login_and_capture_cookies(email: str, password: str) -> dict[str, str]:
     return cookies
 
 
+def _read_page_cursor() -> int:
+    if PAGE_CURSOR.exists():
+        try:
+            v = int(PAGE_CURSOR.read_text().strip())
+            return max(1, min(PAGE_MAX, v))
+        except Exception:
+            pass
+    return 1
+
+
+def _save_page_cursor(page: int) -> None:
+    try:
+        PAGE_CURSOR.parent.mkdir(parents=True, exist_ok=True)
+        # Wrap around at PAGE_MAX so we periodically revisit early pages
+        # (new listings appear at page 1; old ones drift back).
+        PAGE_CURSOR.write_text(str(((page - 1) % PAGE_MAX) + 1))
+    except Exception as e:
+        print(f"[guazi] page cursor save failed: {e}", file=sys.stderr)
+
+
 def _ensure_session() -> None:
     """Populate SESSION_COOKIES from cache, or run the login flow once."""
     global SESSION_COOKIES
@@ -364,7 +390,10 @@ def fetch_list(
     out: list[Listing] = []
     seen: set[str] = set()
     skipped = 0
-    page_num = 1
+    page_num = _read_page_cursor()
+    start_page = page_num
+    print(f"[guazi] starting from page {page_num} (wrap at {PAGE_MAX})",
+          file=sys.stderr)
     _ensure_session()
     wsa = OxylabsWSA()
     use_api = wsa.enabled
@@ -473,7 +502,10 @@ def fetch_list(
             if len(out) >= limit:
                 break
         page_num += 1
-    print(f"[guazi] total parsed: {len(out)} (skipped {skipped} by client filters)",
+    # Persist next page for the following self-chained run.
+    _save_page_cursor(page_num)
+    print(f"[guazi] total parsed: {len(out)} (skipped {skipped}, "
+          f"pages {start_page}-{page_num - 1}, next start={((page_num - 1) % PAGE_MAX) + 1})",
           file=sys.stderr)
     return out
 
