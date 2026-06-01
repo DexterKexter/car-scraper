@@ -351,6 +351,179 @@ def _ensure_session() -> None:
               file=sys.stderr)
 
 
+# ───────────────────────── JSON facade API (AUT-73) ─────────────────────────
+# Listing now comes from the same JSON endpoint the site's own front-end calls,
+# instead of scraping SSR HTML page-by-page. One EdgeOne-cleared browser page is
+# opened (via StealthyFetcher's page_action hook); every list query then runs as
+# an in-page fetch(), so we pay one Chromium load per run instead of one per list
+# page. Full reverse-engineered spec: Linear AUT-73.
+API_LIST_PATH = "/os/facade/search/product/list?language=en"
+API_BRANDS_PATH = "/os/product/filter/queryBrandList?language=en"
+LIST_PAGE_SIZE = 30      # hard server max (>=31 → 每页数超过最大查询阈值)
+OFFSET_CAP = 480         # server exposes only ~first 500 rows of any one query
+MAX_JOBS_PER_RUN = 80    # cap (brandId,seriesId) jobs per batch so a single
+                         # page_action stays well under the fetch timeout
+JOB_CURSOR = Path(".cache/guazi-job.txt")  # "<job_idx>:<page>" across self-chains
+
+# Runs inside the EdgeOne-cleared page. Builds the brand×series job list from
+# queryBrandList, resumes at (startIdx, startPage), paginates each series to the
+# offset cap, value-filters against list-level fields, and collects up to `limit`
+# items. Returns {items, nextIdx, nextPage, totalJobs, visited}. Every field it
+# filters on is in the list payload, so no detail fetch is needed to filter.
+_JS_SWEEP = r"""
+async ({startIdx, startPage, limit, filters, guid, did, PS, CAP, MAXJOBS}) => {
+  const f = filters || {};
+  const post = async (brandId, seriesId, pn) => {
+    const body = {language:'en', businessType:5, clientScene:'cars', sourceFrom:'wap',
+      countryCode:'', guid, did, pageSize:PS, pageNum:pn, brandId, seriesIds:[seriesId]};
+    const r = await fetch('/os/facade/search/product/list?language=en', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify(body), credentials:'include'});
+    const j = await r.json();
+    return (j.data && j.data.list) || [];
+  };
+  const br = await (await fetch('/os/product/filter/queryBrandList?language=en', {credentials:'include'})).json();
+  const groups = (br.data && br.data.brands) || {};
+  const jobs = [];
+  for (const k in groups) for (const b of groups[k])
+    for (const t of (b.tags || [])) jobs.push([b.id, t.id]);
+  const total = jobs.length;
+  if (!total) return {items:[], nextIdx:0, nextPage:1, totalJobs:0, visited:0};
+
+  const yearOf = (m) => (m && /^\d{4}/.test(m)) ? Number(m.slice(0,4)) : null;
+  const gradeOf = (labels) => {
+    for (const l of labels || []) if (l.type === 2) {
+      const m = /^Grade\s+(\S+)/.exec(l.name || ''); if (m) return m[1];
+    }
+    return '';
+  };
+  const keep = (it) => {
+    const y = yearOf(it.mfgDate);
+    if (f.minYear != null && (y == null || y < f.minYear)) return false;
+    if (f.maxYear != null && (y == null || y > f.maxYear)) return false;
+    if (f.maxMileage != null) {
+      const km = it.mileage ? Number(String(it.mileage).replace(/,/g,'')) : null;
+      if (km != null && km > f.maxMileage) return false;
+    }
+    if (f.minPrice != null) {
+      const p = it.price ? Number(String(it.price).replace(/[^0-9.]/g,'')) : null;
+      if (p == null || p < f.minPrice) return false;   // also drops auction lots (price null)
+    }
+    if (f.grades && f.grades.length && !f.grades.includes((gradeOf(it.labels) || '').toUpperCase())) return false;
+    if (f.sources && f.sources.length) {
+      const pl = it.productLabels || [];
+      if (!pl.some(x => f.sources.includes(String(x)))) return false;
+    }
+    return true;
+  };
+
+  const items = [], seen = new Set();
+  let i = startIdx % total, visited = 0;
+  let resumeIdx = i, resumePage = 1;
+  while (items.length < limit && visited < total && visited < MAXJOBS) {
+    const [brandId, seriesId] = jobs[i % total];
+    let pn = (visited === 0) ? Math.max(1, startPage) : 1;
+    let exhausted = false, stoppedAt = pn;
+    while ((pn - 1) * PS < CAP) {
+      let lst;
+      try { lst = await post(brandId, seriesId, pn); } catch (e) { exhausted = true; break; }
+      if (!lst.length) { exhausted = true; break; }
+      for (const it of lst) {
+        const id = it.productId || it.seoUri;
+        if (id && seen.has(id)) continue;
+        if (id) seen.add(id);
+        if (keep(it)) items.push(it);
+        if (items.length >= limit) break;
+      }
+      stoppedAt = pn;
+      if (lst.length < PS) { exhausted = true; break; }
+      if (items.length >= limit) break;
+      pn++;
+    }
+    if (items.length >= limit && !exhausted) {
+      // stop mid-series: resume this same series at the next page next run
+      const nextPage = stoppedAt + 1;
+      if ((nextPage - 1) * PS < CAP) { resumeIdx = i % total; resumePage = nextPage; }
+      else { resumeIdx = (i + 1) % total; resumePage = 1; }
+      visited++;
+      break;
+    }
+    i++; visited++;
+    resumeIdx = i % total; resumePage = 1;
+  }
+  return {items, nextIdx: resumeIdx, nextPage: resumePage, totalJobs: total, visited};
+}
+"""
+
+
+def _parse_guid_did(cookie_str: str) -> tuple[str, str]:
+    """Pull guid (cookie `uuid`) and did (cookie `global_did`) out of a
+    document.cookie string. Both are required, non-empty, by the list API."""
+    ck: dict[str, str] = {}
+    for part in (cookie_str or "").split("; "):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            ck[k] = v
+    return ck.get("uuid", ""), ck.get("global_did", "")
+
+
+def _run_in_page(job_fn):
+    """Open one EdgeOne-cleared guazi page and run job_fn(page) inside it.
+
+    StealthyFetcher's stealth Chromium clears the TencentEdgeOne bot wall on
+    navigation; the page_action hook then runs our in-page automation on the
+    live Playwright page. page_action's own return value is discarded, so
+    job_fn's result is stashed via a closure holder.
+    """
+    holder: dict = {}
+
+    def _driver(page):
+        try:
+            try:
+                page.wait_for_timeout(800)  # let guazi JS mint uuid/global_did
+            except Exception:
+                pass
+            holder["result"] = job_fn(page)
+        except Exception as e:
+            holder["error"] = e
+            print(f"[guazi] page_action error: {e}", file=sys.stderr)
+        return page
+
+    StealthyFetcher.fetch(
+        BASE + LIST_PATH,
+        headless=True,
+        network_idle=True,
+        humanize=True,
+        wait=2500,
+        timeout=90000,
+        cookies=_cookies_for_stealthy(),
+        page_action=_driver,
+    )
+    if "error" in holder:
+        raise holder["error"]
+    return holder.get("result")
+
+
+def _read_job_cursor() -> tuple[int, int]:
+    """Return (job_idx, page). Tolerates a missing/legacy cache → (0, 1)."""
+    try:
+        raw = JOB_CURSOR.read_text().strip()
+        if ":" in raw:
+            idx, pn = raw.split(":", 1)
+            return max(0, int(idx)), max(1, int(pn))
+        return max(0, int(raw)), 1
+    except Exception:
+        return 0, 1
+
+
+def _save_job_cursor(idx: int, page: int) -> None:
+    try:
+        JOB_CURSOR.parent.mkdir(parents=True, exist_ok=True)
+        JOB_CURSOR.write_text(f"{max(0, idx)}:{max(1, page)}")
+    except Exception as e:
+        print(f"[guazi] job cursor save failed: {e}", file=sys.stderr)
+
+
 BRAND_HREF_RE = re.compile(r'/used-cars/([a-z][a-z0-9-]{1,40})/')
 # Suffix tokens that mean "this isn't a pure-brand URL" — filter URLs,
 # transmission/body/price/mileage facets that guazi exposes as SEO landing
@@ -641,6 +814,160 @@ def fetch_list(
         print(f"[guazi] total parsed: {len(out)} (skipped {skipped}, "
               f"pages {start_page}-{page_num - 1})", file=sys.stderr)
     return out
+
+
+def _grade_from_labels(labels) -> str:
+    """Extract the condition grade letter from a list item's labels[]
+    (label type 2 → name like 'Grade C')."""
+    for l in labels or []:
+        if isinstance(l, dict) and l.get("type") == 2:
+            m = re.match(r"Grade\s+(\S+)", l.get("name") or "")
+            if m:
+                return m.group(1)
+    return ""
+
+
+def _listing_from_api(it: dict) -> Listing:
+    """Map one `data.list[]` item into a Listing. Slug parse fills brand/model/
+    year/engine/etc.; list-level fields overlay the rest. enrich_detail() still
+    runs later for VIN, full spec, inspection report, and the photo gallery."""
+    seo = it.get("seoUri") or ""
+    slug = seo[:-5] if seo.endswith(".html") else seo
+    href = ("/products/" + seo) if seo else ""
+    parsed = parse_slug(slug)
+    if parsed:
+        l = Listing(url=urljoin(BASE, href), slug=slug, **parsed)
+    else:
+        l = Listing(url=urljoin(BASE, href), slug=slug,
+                    listing_id=it.get("productId") or slug)
+    if it.get("productId"):
+        l.listing_id = it["productId"]
+    if it.get("title"):
+        l.title = str(it["title"]).strip()
+    if it.get("brandName"):
+        l.brand = it["brandName"]
+    if it.get("fuelTypeName"):
+        l.fuel = it["fuelTypeName"]
+    price = it.get("price")
+    if price:
+        l.price_raw = price
+        l.price_amount = _to_float(re.sub(r"[^0-9.]", "", price))
+    elif it.get("auctionType") is not None:
+        l.is_auction = True
+    if it.get("mfgDate"):
+        l.production_date = it["mfgDate"]
+        if l.year is None and re.match(r"\d{4}", str(it["mfgDate"])):
+            l.year = int(str(it["mfgDate"])[:4])
+    if it.get("mileage") and l.mileage_km is None:
+        try:
+            l.mileage_km = int(str(it["mileage"]).replace(",", ""))
+        except ValueError:
+            pass
+    if g := _grade_from_labels(it.get("labels")):
+        l.grade = g
+    if it.get("headImage"):
+        l.photos = [it["headImage"]]
+    l.raw["api"] = {
+        "productLabels": it.get("productLabels"),
+        "businessType": it.get("businessType"),
+        "brandId": it.get("brandId"),
+        "seriesId": it.get("seriesId"),
+        "exchangeRate": it.get("exchangeRate"),
+    }
+    return l
+
+
+def _filters_from_params(
+    params: dict | None,
+    min_year: int | None,
+    max_year: int | None,
+    max_mileage_km: int | None,
+    grades: set[str] | None,
+) -> dict:
+    """Translate the workflow's -f filter params + explicit args into the JS
+    sweep's filter dict. Recognised guazi keys: price=MIN[,MAX] (USD),
+    licenseYear=YEAR[,..], roadHaul=MIN,MAX (km), detectionLevels=S,A,
+    vehicleSourceClassificationCustomers=180003,180002."""
+    p = params or {}
+    f: dict = {}
+
+    def _lo(v):
+        head = str(v).split(",")[0].strip()
+        try:
+            return float(head) if head else None
+        except ValueError:
+            return None
+
+    def _hi(v):
+        parts = str(v).split(",")
+        if len(parts) > 1 and parts[1].strip():
+            try:
+                return float(parts[1].strip())
+            except ValueError:
+                return None
+        return None
+
+    if "price" in p and (lo := _lo(p["price"])) is not None:
+        f["minPrice"] = lo
+    if "roadHaul" in p and (hi := _hi(p["roadHaul"])) is not None:
+        f["maxMileage"] = hi
+    license_year = _lo(p["licenseYear"]) if "licenseYear" in p else None
+    min_y = min_year if min_year is not None else (int(license_year) if license_year else None)
+    if min_y is not None:
+        f["minYear"] = min_y
+    if max_year is not None:
+        f["maxYear"] = max_year
+    if max_mileage_km is not None:
+        f["maxMileage"] = max_mileage_km  # explicit arg wins over roadHaul
+    gset = set(grades) if grades else set()
+    if "detectionLevels" in p:
+        gset |= {g.strip().upper() for g in str(p["detectionLevels"]).split(",") if g.strip()}
+    if gset:
+        f["grades"] = sorted(gset)
+    if "vehicleSourceClassificationCustomers" in p:
+        f["sources"] = [s.strip() for s in str(p["vehicleSourceClassificationCustomers"]).split(",") if s.strip()]
+    return f
+
+
+def fetch_list_api(
+    limit: int = 10,
+    params: dict | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    max_mileage_km: int | None = None,
+    grades: set[str] | None = None,
+) -> list[Listing]:
+    """Brand×series sweep over the JSON facade API (replaces the SSR-HTML
+    per-page scrape for the default /used-cars/ root). Resumes from a persistent
+    (job_idx, page) cursor; value-filters in-page; returns mapped Listings."""
+    _ensure_session()
+    filters = _filters_from_params(params, min_year, max_year, max_mileage_km, grades)
+    start_idx, start_page = _read_job_cursor()
+    print(f"[guazi] api sweep: start job {start_idx}:{start_page}, limit {limit}, "
+          f"filters {filters}", file=sys.stderr)
+
+    def _job(page):
+        guid, did = _parse_guid_did(page.evaluate("() => document.cookie"))
+        if not guid or not did:
+            raise RuntimeError("no guid/global_did cookie after homepage load")
+        return page.evaluate(_JS_SWEEP, {
+            "startIdx": start_idx, "startPage": start_page, "limit": limit,
+            "filters": filters, "guid": guid, "did": did,
+            "PS": LIST_PAGE_SIZE, "CAP": OFFSET_CAP, "MAXJOBS": MAX_JOBS_PER_RUN,
+        })
+
+    res = _run_in_page(_job) or {}
+    raw = res.get("items") or []
+    next_idx = int(res.get("nextIdx", start_idx))
+    next_page = int(res.get("nextPage", 1))
+    total_jobs = res.get("totalJobs")
+    _save_job_cursor(next_idx, next_page)
+    print(f"[guazi] api sweep: {len(raw)} items, visited {res.get('visited')} "
+          f"of {total_jobs} jobs, next {next_idx}:{next_page}", file=sys.stderr)
+    if not total_jobs:
+        print("[guazi] WARNING: empty brand matrix (queryBrandList returned "
+              "nothing) — EdgeOne block or API change?", file=sys.stderr)
+    return [_listing_from_api(it) for it in raw]
 
 
 JSONLD_OPEN_RE = re.compile(
@@ -987,14 +1314,24 @@ def run(
     max_year: int | None = None,
     grades: set[str] | None = None,
 ) -> list[dict]:
-    # if grade filter is requested, we must over-fetch candidates because
-    # grade is known only after detail enrichment
-    overfetch_mult = 4 if grades else 1
+    # The SSR path only learns grade after detail enrichment, so it over-fetches
+    # candidates when a grade filter is set. The API path already has grade (and
+    # filters on it in-page), so it fetches exactly `limit` — no wasted details.
+    api_mode = path == LIST_PATH
+    overfetch_mult = 4 if (grades and not api_mode) else 1
     target = limit * overfetch_mult
-    listings = fetch_list(
-        limit=target, path=path, params=params,
-        max_mileage_km=max_mileage_km, min_year=min_year, max_year=max_year,
-    )
+    if api_mode:
+        # Default root sweep → JSON facade API (brand×series, AUT-73).
+        listings = fetch_list_api(
+            limit=target, params=params, min_year=min_year, max_year=max_year,
+            max_mileage_km=max_mileage_km, grades=grades,
+        )
+    else:
+        # Explicit --path override (e.g. /used-cars/sedan/) → legacy SSR walk.
+        listings = fetch_list(
+            limit=target, path=path, params=params,
+            max_mileage_km=max_mileage_km, min_year=min_year, max_year=max_year,
+        )
     if grades and len(listings) < target:
         print(
             f"[guazi] WARNING: fetched {len(listings)}/{target} candidates for "

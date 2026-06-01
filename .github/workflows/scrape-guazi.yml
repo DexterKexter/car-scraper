@@ -164,8 +164,9 @@ jobs:
       # Self-chain: dispatch the next run on success. Daemon-style loop —
       # batches keep coming as fast as the API can keep up. Cron heartbeat
       # restarts the chain if a run ever fails (and breaks the chain).
+      # Skipped for no_db dry-runs so a manual smoke test can't spawn the daemon.
       - name: Trigger next batch
-        if: success()
+        if: success() && github.event.inputs.no_db != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
