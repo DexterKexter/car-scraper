@@ -41,9 +41,12 @@ jobs:
       - name: Mirror blocked images -> Supabase Storage
         env:
           PYTHONUNBUFFERED: "1"
-          # service_role key — bucket policy is public-read / service-write,
-          # so the anon key used by the scrapers gets a 403 on upload.
+          # Storage write needs the service_role key (bucket policy is
+          # public-read / service-write). Prefer a dedicated SUPABASE_SERVICE_KEY
+          # secret; fall back to SUPABASE_KEY in case that secret already holds
+          # the service_role key. If both are anon, upload returns 403.
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           ARGS=""
           [ -n "${{ github.event.inputs.limit }}" ] && ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
