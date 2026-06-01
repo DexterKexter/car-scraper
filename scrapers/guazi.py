@@ -418,6 +418,12 @@ def _discover_brands() -> list[str]:
     brands = sorted(s for s in found if s not in NON_BRAND_SLUGS)
     print(f"[guazi] discovered {len(brands)} brand candidates "
           f"(raw {len(found)})", file=sys.stderr)
+    if not brands:
+        # Dump first 20 unique /used-cars/* patterns in body — helps see
+        # whether brand-nav is JSON-streamed, react-routed, or absent.
+        any_uc = sorted(set(re.findall(r'/used-cars/[a-z][a-z0-9-]{1,40}/?', body)))
+        print(f"[guazi]   DEBUG body /used-cars/ matches ({len(any_uc)}): "
+              f"{any_uc[:30]}", file=sys.stderr)
     return brands
 
 
