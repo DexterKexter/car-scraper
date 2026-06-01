@@ -178,6 +178,34 @@ def fetch_cars(client: httpx.Client, limit: int | None,
     return rows[:limit] if limit else rows
 
 
+def mirror_rows(rows: list[dict], workers: int = 4) -> int:
+    """Mirror blocked images for an in-memory batch of just-upserted car
+    rows (each needs source/source_id/images). Called by the pipeline right
+    after the DB upsert so freshly-scraped raw CDN URLs are rehosted in the
+    same run — otherwise a self-chaining scrape overwrites already-mirrored
+    URLs with raw ones and the catalog flickers broken until the next cron.
+    Returns the number of images rehosted."""
+    if not SERVICE_KEY:
+        print("[mirror] no service key — skip inline mirror", flush=True)
+        return 0
+    todo = [r for r in rows
+            if r and any(_is_blocked(u or "") for u in (r.get("images") or []))]
+    if not todo:
+        return 0
+    ok = 0
+    with httpx.Client() as client:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(mirror_car, client, r) for r in todo]
+            for f in as_completed(futs):
+                try:
+                    ok += f.result()[0]
+                except Exception as e:
+                    print(f"  ! inline mirror: {e}", flush=True)
+    print(f"[mirror] inline: {ok} images rehosted across {len(todo)} cars",
+          flush=True)
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
