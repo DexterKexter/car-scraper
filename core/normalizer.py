@@ -361,6 +361,50 @@ def _call_openrouter(
     return out
 
 
+def _dedup_consecutive(s: str) -> str:
+    """Collapse consecutive duplicate words: 'Dana V1 V1' -> 'Dana V1'."""
+    out: list[str] = []
+    for w in s.split():
+        if not out or out[-1].casefold() != w.casefold():
+            out.append(w)
+    return " ".join(out)
+
+
+def _smart_title(s: str) -> str:
+    """Title-case plain lowercase words while preserving alphanumeric model
+    codes (H6, ix35, eπ007), all-caps acronyms (NAT, GS), and hyphenated
+    codes (CR-V, EM-i). 'sienna' -> 'Sienna', 'nammi 01' -> 'Nammi 01'."""
+    def fix(w: str) -> str:
+        if any(ch.isdigit() for ch in w):  # H6, ix35, eπ007, 530
+            return w
+        if w.isupper():                     # NAT, GS, EV, CR-V
+            return w
+        if "-" in w:                        # already-cased hyphenated tokens
+            return w
+        return w[:1].upper() + w[1:]
+    return " ".join(fix(w) for w in s.split())
+
+
+def _clean_names(rec: dict) -> None:
+    """Deterministic post-process for the LLM's name fields (also fixes cache
+    hits). Conservative: dedup consecutive words + smart Title-case. No
+    brand-strip (would corrupt sub-brands like 'Dongfeng NAMMI')."""
+    for fld in ("mark", "model_family", "model"):
+        v = rec.get(fld)
+        if isinstance(v, str) and v:
+            rec[fld] = _smart_title(_dedup_consecutive(v))
+
+
+def _finalize(records: list[dict]) -> list[dict]:
+    """Strip internal __ keys and apply name hygiene to every record."""
+    out: list[dict] = []
+    for r in records:
+        rec = {k: v for k, v in r.items() if not k.startswith("__")}
+        _clean_names(rec)
+        out.append(rec)
+    return out
+
+
 def normalize(
     records: list[dict],
     api_key: str | None = None,
@@ -392,7 +436,7 @@ def normalize(
     if not pending:
         print(f"[normalizer] all {len(records)} from cache", file=sys.stderr)
         cache.close()
-        return [{k: v for k, v in r.items() if not k.startswith("__")} for r in records]
+        return _finalize(records)
 
     if not api_key:
         print(
@@ -400,7 +444,7 @@ def normalize(
             file=sys.stderr,
         )
         cache.close()
-        return [{k: v for k, v in r.items() if not k.startswith("__")} for r in records]
+        return _finalize(records)
 
     print(
         f"[normalizer] {len(pending)} pending (of {len(records)}), model={model}, batch={batch_size}",
@@ -422,7 +466,7 @@ def normalize(
                     _cache_put(cache, rec["__key"], norm, model)
 
     cache.close()
-    return [{k: v for k, v in r.items() if not k.startswith("__")} for r in records]
+    return _finalize(records)
 
 
 def main() -> None:
