@@ -1240,21 +1240,39 @@ def enrich_detail(l: Listing) -> Listing:
     if color_match:
         l.color = color_match.group(1)
 
-    # Filter out promo/brand/tag images; keep only real car photos.
-    # Junk patterns: /files/brand/, /files/tag_img/, /ovp/ (overseas marketing).
-    JUNK_RE = re.compile(r"/files/|/ovp/")
+    # The full gallery (~30 shots, named by angle) lives in the streamed
+    # __next_f payload (`joined`) as
+    #   image-oversea.../ovp/product/prod/<slug>-<angle>-<productId>.(jpg|png)
+    # The inline <img>/JSON-LD only expose a handful, so pull the productId-
+    # scoped set first. The productId is in every gallery filename, which also
+    # keeps other cars' customer-review images (also under /ovp/) out.
     photos: list[str] = []
-    if og_img := metas.get("og:image"):
-        photos.append(og_img)
-    for img in ld.get("image", []) or []:
-        if isinstance(img, str) and img not in photos:
-            photos.append(img)
-    for src in re.findall(r'<img[^>]+src="(https://[^"]+\.(?:jpe?g|png|webp))', body):
-        if src not in photos:
-            photos.append(src)
-    photos = [p for p in photos if not JUNK_RE.search(p)]
+    pid = re.escape(l.listing_id or "")
+    if pid:
+        for u in re.findall(
+            r"https://image-oversea\.guazistatic-global\.com/ovp/product/prod/"
+            r"[^\"\s\\]*" + pid + r"[^\"\s\\]*\.(?:jpe?g|png|webp)",
+            joined,
+        ):
+            u = u.split("?")[0]
+            if u not in photos:
+                photos.append(u)
+    # Fallback for thin / login-walled pages where the streamed gallery is
+    # absent: og:image + JSON-LD + inline <img>, minus brand/tag logos
+    # (/files/) and non-gallery /ovp/ marketing.
+    if not photos:
+        JUNK_RE = re.compile(r"/files/|/ovp/(?!product/prod/)")
+        if og_img := metas.get("og:image"):
+            photos.append(og_img)
+        for img in ld.get("image", []) or []:
+            if isinstance(img, str) and img not in photos:
+                photos.append(img)
+        for src in re.findall(r'<img[^>]+src="(https://[^"]+\.(?:jpe?g|png|webp))', body):
+            if src not in photos:
+                photos.append(src)
+        photos = [p for p in photos if not JUNK_RE.search(p)]
     if photos:
-        l.photos = photos[:30]
+        l.photos = photos[:40]
 
     return l
 
