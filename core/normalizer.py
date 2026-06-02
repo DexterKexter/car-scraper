@@ -328,6 +328,12 @@ def _call_openrouter(
             }
         ],
         "temperature": 0,
+        # Cap output: a batch of ~20 normalized records is a few thousand
+        # tokens. Without this, OpenRouter reserves the model's default
+        # (deepseek-v4-pro = 65536), which 402s when the credit balance
+        # can't cover that reservation → the batch fails and raw CJK
+        # brand/model values leak through unnormalized.
+        "max_tokens": 8192,
     }
     r = client.post(OPENROUTER_URL, headers=headers, json=body, timeout=TIMEOUT)
     if r.status_code != 200:
