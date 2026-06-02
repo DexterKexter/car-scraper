@@ -204,8 +204,9 @@ fuzzy-matched kolesa brand + that brand's full model list. Rules:
     parent: dong-feng, gac, voyah, byd).
   - If no candidate fits, leave kolesa_*_slug empty and in_kolesa=false.
 
-Output via the JSON tool only. Empty string is only allowed for complectation,
-kolesa_brand_slug, and kolesa_model_slug. mark, model_family, and model MUST be filled.
+Output a single JSON object {"results": [...]} matching the schema. Empty
+string is only allowed for complectation, kolesa_brand_slug, and
+kolesa_model_slug. mark, model_family, and model MUST be filled.
 """
 
 OUTPUT_SCHEMA = {
@@ -316,23 +317,23 @@ def _call_openrouter(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _build_prompt(items, idx)},
         ],
-        "tool_choice": {"type": "function", "function": {"name": "submit_normalized"}},
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "submit_normalized",
-                    "description": "Submit normalized records.",
-                    "parameters": OUTPUT_SCHEMA,
-                },
-            }
-        ],
+        # Force JSON via response_format (NOT a forced tool_choice): Owl
+        # Alpha's OpenRouter routing 404s on tool_choice but supports
+        # structured_outputs / response_format. The response arrives in
+        # message.content and is parsed by the content fallback below.
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "normalized",
+                "strict": True,
+                "schema": OUTPUT_SCHEMA,
+            },
+        },
         "temperature": 0,
         # Cap output: a batch of ~20 normalized records is a few thousand
         # tokens. Without this, OpenRouter reserves the model's default
-        # (deepseek-v4-pro = 65536), which 402s when the credit balance
-        # can't cover that reservation → the batch fails and raw CJK
-        # brand/model values leak through unnormalized.
+        # (some models default to 64k+), which can 402 on a tight credit
+        # balance and fail the batch → raw CJK brand/model values leak.
         "max_tokens": 8192,
     }
     r = client.post(OPENROUTER_URL, headers=headers, json=body, timeout=TIMEOUT)
