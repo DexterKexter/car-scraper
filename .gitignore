@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 out/
+!out/kolesa_catalog.json
 *.log
 .DS_Store
 .claude/
