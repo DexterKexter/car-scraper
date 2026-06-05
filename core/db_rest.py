@@ -225,6 +225,25 @@ def build_car_row(r: dict, source: str, brand_map: dict, model_map: dict,
     mf = r.get("model_family") or r.get("model") or ""
     if not (mark and mf):
         return None
+    # Drop rows with no price or a price below a sane real-world floor.
+    # Encar sometimes returns mis-listed cars at a few hundred 만원 (a few
+    # hundred USD); guazi sporadically inserts rows before the price field
+    # is populated. Floors are per-currency. A row that fails this check is
+    # cheaper to refetch later than to ship as a $300 "BMW".
+    price_amt = r.get("price_amount")
+    currency = (r.get("currency") or "").upper()
+    PRICE_FLOOR = {"KRW": 2_000_000, "USD": 1500, "CNY": 10_000}
+    try:
+        price_val = float(price_amt) if price_amt is not None else 0.0
+    except (TypeError, ValueError):
+        price_val = 0.0
+    if price_val <= 0 or price_val < PRICE_FLOOR.get(currency, 0):
+        print(
+            f"[db] skip {source}/{r.get('listing_id') or r.get('id')} — "
+            f"price {price_amt} {currency} below floor",
+            file=sys.stderr,
+        )
+        return None
     # Concrete model wins. Empty -> fall back to family so the row still inserts.
     concrete = (r.get("model") or "").strip() or mf
     bslug = slugify(mark)
