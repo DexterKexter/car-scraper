@@ -48,6 +48,9 @@ BLOCKED_HOST_SUBSTRINGS = (
     "image-pub.guazistatic.com",
     "autoimg.cn",                    # che168 (Chrome ORB block)
     "i1.autocango.com",              # autocango (geo-restricted to mainland)
+    "ci.encar.com",                  # encar — fine globally but adds 250-400ms
+                                     # trans-Pacific RTT to LCP for KZ users;
+                                     # mirroring beats Korea round-trip.
 )
 # Per-host Referer override — these CDNs check Referer against their own site.
 REFERER_BY_HOST = {
@@ -56,6 +59,7 @@ REFERER_BY_HOST = {
     "image-pub.guazistatic.com":     "https://www.guazi.com/",
     "autoimg.cn":                    "https://www.autohome.com.cn/",
     "i1.autocango.com":              "https://www.autocango.com/",
+    "ci.encar.com":                  "https://www.encar.com/",
 }
 PUBLIC_URL = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}"
 BASE_DL_HEADERS = {
