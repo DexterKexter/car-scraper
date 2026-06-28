@@ -1,6 +1,11 @@
 """Upsert scraper output into Supabase via PostgREST.
 
-Uses anon key (RLS disabled). Resolves brand_id/model_id via REST GET, then bulk POSTs cars.
+Uses anon key (RLS disabled).
+- brands  → resolved via REST GET / POST (ensure_brand)
+- models  → resolved via the `resolve-model` edge function (ensure_model)
+            so we don't auto-create dirty rows like `auto-monjaro-l` or `-5`
+- cars    → bulk POST with brand_id / model_id already set so the
+            `cars_normalize_brand_model` trigger is a no-op.
 """
 from __future__ import annotations
 import argparse, json, os, re, sys
@@ -165,38 +170,58 @@ def ensure_brand(client, key, slug: str, name: str, kolesa_slug: str | None) -> 
     raise RuntimeError(f"ensure_brand failed {r.status_code}: {r.text[:200]}")
 
 
+RESOLVE_MODEL_URL = f"{SUPABASE_URL}/functions/v1/resolve-model"
+
+
 def ensure_model(client, key, brand_id: int, slug: str, name: str,
                  kolesa_slug: str | None, kolesa_brand_slug: str | None,
                  body_type: str | None) -> int:
-    # First: check existence by (brand_id, lower(name)) — there's a unique constraint on it
-    r0 = client.get(
-        f"{SUPABASE_URL}/rest/v1/models",
-        params={"select": "id,name,slug,kolesa_slug", "brand_id": f"eq.{brand_id}",
-                "name": f"ilike.{name}"},
-        headers=headers(key),
-    )
-    if r0.status_code == 200 and r0.json():
-        existing = r0.json()[0]
-        # backfill kolesa_slug if missing
-        if kolesa_slug and not existing.get("kolesa_slug"):
-            client.patch(
-                f"{SUPABASE_URL}/rest/v1/models",
-                params={"id": f"eq.{existing['id']}"},
-                headers=headers(key, "return=minimal"),
-                json={"kolesa_slug": kolesa_slug, "kolesa_brand_slug": kolesa_brand_slug},
-            )
-        return existing["id"]
+    """Resolve model via the resolve-model edge function.
 
-    payload = [{"brand_id": brand_id, "slug": slug, "name": name, "source": SOURCE_TAG,
-                "kolesa_slug": kolesa_slug, "kolesa_brand_slug": kolesa_brand_slug,
-                "body_type": body_type}]
-    r = client.post(f"{SUPABASE_URL}/rest/v1/models",
-                    params={"on_conflict": "brand_id,slug,source"},
-                    headers=headers(key, "resolution=merge-duplicates,return=representation"),
-                    json=payload)
-    if r.status_code in (200, 201):
-        return r.json()[0]["id"]
-    raise RuntimeError(f"ensure_model failed {r.status_code}: {r.text[:200]}")
+    Flow (see supabase/functions/resolve-model in DexterKexter/china-car):
+      1. strip "auto " junk from name
+      2. exact ilike on models.name within brand
+      3. lookup in model_aliases by (brand_id, raw_name)
+      4. LLM (Claude Haiku) decides matched_existing / genuinely_new / skip
+         - matched → create alias + return existing model_id
+         - new → create model with canonical name + globally-unique slug
+                  (computed server-side, ignores the local `slug` arg)
+
+    The local `slug` arg is kept in the signature so callers don't need to
+    change, but the server picks the actual slug. After resolution, this
+    backfills kolesa_* / body_type on the row if they were missing.
+    """
+    r = client.post(
+        RESOLVE_MODEL_URL,
+        headers=headers(key),
+        json={"brand_id": brand_id, "model_name": name},
+        timeout=60.0,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"resolve-model HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    model_id = data.get("model_id")
+    if not model_id:
+        raise RuntimeError(
+            f"resolve-model could not resolve {name!r} for brand {brand_id}: {data}"
+        )
+
+    # Backfill kolesa / body_type only when the row is missing them.
+    # PostgREST's `select=is.null` filter syntax targets one row safely.
+    patch_fields: dict[str, str | None] = {}
+    if kolesa_slug:
+        patch_fields["kolesa_slug"] = kolesa_slug
+        patch_fields["kolesa_brand_slug"] = kolesa_brand_slug
+    if body_type:
+        patch_fields["body_type"] = body_type
+    if patch_fields:
+        client.patch(
+            f"{SUPABASE_URL}/rest/v1/models",
+            params={"id": f"eq.{model_id}"},
+            headers=headers(key, "return=minimal"),
+            json=patch_fields,
+        )
+    return model_id
 
 
 def _displacement(raw):
